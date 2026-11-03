@@ -13,7 +13,7 @@
 - SMTP STARTTLS candidate invitations with 1–5 proposed times, private tokenized booking page and confirmation email; times are stored in UTC and displayed in candidate's browser timezone.
 - Role-specific browser voice interviewing via OpenAI Realtime WebRTC **when configured**. Short-lived voice secrets are minted server-side and candidate must explicitly consent. Session restricted to booked time window.
 - Optional browser-collected transcript snippets for **human review only** (unverified client provenance). Human-entered competency scores and JSON report; no automatic hiring decision.
-- Docker Compose with private PostgreSQL and loopback-only API at `127.0.0.1:18080`.
+- Single Docker Compose stack: PostgreSQL, FastAPI and container Nginx, with only container Nginx exposed at `127.0.0.1:18080`. Optional Caddy profile for standalone HTTPS.
 - Nginx HTTP validation and HTTPS reverse proxy configuration for the target domain.
 
 ## NOT yet implemented / critical limitations
@@ -32,19 +32,24 @@
 - Certbot installed, reachable outbound SMTP and OpenAI API as required.
 - Sufficient disk space for PostgreSQL backup/restore. Allow SSH only to trusted administrators.
 
-## 1. Install on the target server
+## 1. Deploy with one Docker Compose stack
 
-Copy repository to `/opt/interview-ai`, or upload the provided ZIP and extract:
+SSH into the target server and clone the repository (do not overwrite an existing `.env` or PostgreSQL volume):
 
 ```bash
-sudo mkdir -p /opt/interview-ai
-sudo chown "$USER":"$USER" /opt/interview-ai
+ssh root@94.184.27.131
+mkdir -p /opt/interview-ai
+cd /opt
+# On a new installation only:
+git clone https://github.com/hassanshariati/interview.git interview-ai
 cd /opt/interview-ai
-# place the ZIP file here, then:
-unzip -o interview-ai-deploy.zip
 python3 scripts/generate_env.py --admin-email admin@your-organization.example
 chmod 600 .env
 ```
+
+The default Compose file starts **three services**: `db` (private PostgreSQL), `api` (private FastAPI), and `proxy` (container Nginx on loopback port `18080`). An optional `edge` service uses Caddy for HTTPS, but is deliberately disabled by default so it cannot take over port 80/443 on a host already running Nginx.
+
+If you are updating an existing checkout, run `git pull --ff-only` in `/opt/interview-ai` and preserve `.env` and Docker volumes.
 
 The generator prints the **initial admin password one time**. Save it in a password manager. The `.env` contains sensitive values and must never be added to Git.
 
@@ -68,7 +73,23 @@ If you need to reset the password without command-line exposure:
 docker compose exec -it api python -m backend.admin_cli reset-password --email admin@your-organization.example
 ```
 
-## 2. Configure Nginx + HTTPS for interview.armember.ir
+## 2. Configure HTTPS for interview.armember.ir
+
+### Recommended on your multi-site server: existing host Nginx
+
+Continue to use the host's Nginx for HTTPS, proxying to the `proxy` service on `127.0.0.1:18080`. The Docker Compose file does **not** bind ports 80/443 in this default mode. Do not install a second host Nginx or overwrite other virtual hosts.
+
+### Alternative on an otherwise empty server: HTTPS inside Compose
+
+**Use only if nothing else listens on 80/443** and the DNS A record is configured. This activates the optional Caddy container with automated TLS:
+
+```bash
+docker compose --profile standalone-https up -d --build --wait
+```
+
+In this mode you do not need a separate host Nginx or Certbot. To stop only the extra Caddy service, run `docker compose --profile standalone-https stop edge`. Do not enable this profile on the current host without checking `ss -lntp` for conflicts.
+
+### Existing host Nginx / Certbot setup
 
 **Before touching Nginx:** check for duplicate domain stanzas in `/etc/nginx/sites-enabled/` and `/etc/nginx/conf.d/`; do not replace existing site configs for other domains.
 
@@ -128,6 +149,7 @@ This command prompts for the password rather than placing it in shell history. D
 docker compose ps
 docker compose logs --tail=100 api
 docker compose logs --tail=100 db
+docker compose logs --tail=100 proxy
 sudo nginx -t
 curl -fsS https://interview.armember.ir/api/v1/health
 ```
@@ -157,4 +179,4 @@ Evaluate job-related knowledge from questions and answers; **do not** derive hir
 
 ## GitHub repository
 
-Intended destination: <https://github.com/hassanshariati/interview>. If GitHub app write access is unavailable, install this ZIP and push the source via authenticated Git on your trusted workstation (not by exposing passwords in chat). Check the connected GitHub app's **Contents: Read and write** permission.
+Committed source: <https://github.com/hassanshariati/interview>. If GitHub app write access is unavailable, install this ZIP and push the source via authenticated Git on your trusted workstation (not by exposing passwords in chat). Check the connected GitHub app's **Contents: Read and write** permission.
