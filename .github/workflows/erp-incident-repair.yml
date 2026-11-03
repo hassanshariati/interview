@@ -1,0 +1,107 @@
+name: One-time ERPNext database host-grant repair
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/erp-incident-repair.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: erp-incident-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    name: Recover ERP DB access without changing business data
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    steps:
+      - name: Add safe site-only MariaDB grant and verify
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "Preflight: checking MariaDB and current account configuration"
+          docker info >/dev/null
+          docker inspect -f '{{.State.Running}}' deploy-db-1 | grep -qx true
+          docker inspect -f '{{.State.Running}}' deploy-backend-1 | grep -qx true
+
+          # Only proceed for the exact database and legacy container-IP user observed in diagnosis.
+          state="$(docker exec deploy-db-1 sh -c '
+            export MYSQL_PWD="$(cat /run/secrets/db_root_password)"
+            exec mariadb --protocol=socket -uroot -N -e "
+              SELECT
+                (SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=\"_8d8877e7c7a80d3d\"),
+                (SELECT COUNT(*) FROM mysql.user WHERE User=\"_8d8877e7c7a80d3d\" AND Host=\"172.18.0.5\"),
+                (SELECT COUNT(*) FROM mysql.user WHERE User=\"_8d8877e7c7a80d3d\" AND Host=\"%\");
+            "
+          ')"
+          if [[ "$state" != "$(printf '1\t1\t0')" ]]; then
+            echo "Preflight unexpected account state (database, legacy host, wildcard): $state"
+            echo "No changes made; refusing to alter any existing wildcard account"
+            exit 1
+          fi
+          echo "Preflight passed: site database exists, legacy host account exists, wildcard account absent"
+
+          # Password stays in site_config.json and is streamed directly to the MariaDB client.
+          # No credential is added to Git, the shell command line, or Actions job logs.
+          if ! (
+            docker exec -i deploy-backend-1 /home/frappe/frappe-bench/env/bin/python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          path = Path("/home/frappe/frappe-bench/sites/armember.ir/site_config.json")
+          config = json.loads(path.read_text())
+          db = config.get("db_name")
+          user = config.get("db_user") or db
+          password = config.get("db_password")
+          assert db == "_8d8877e7c7a80d3d", "Unexpected site database"
+          assert user == db, "Unexpected account"
+          assert isinstance(password, str) and len(password) >= 8, "Password not configured"
+          assert re.fullmatch(r"[a-zA-Z0-9_]{1,64}", user), "Unsupported username"
+          def quote(value):
+              return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+          print("SET SESSION sql_mode = '';")
+          print("CREATE USER IF NOT EXISTS " + quote(user) + "@'%' IDENTIFIED BY " + quote(password) + ";")
+          print("GRANT ALL PRIVILEGES ON `" + db + "`.* TO " + quote(user) + "@'%';")
+          PY
+          ) | docker exec -i deploy-db-1 sh -c '
+            set -e
+            export MYSQL_PWD="$(cat /run/secrets/db_root_password)"
+            exec mariadb --protocol=socket -uroot --silent
+          ' >/dev/null 2>&1; then
+            echo "Grant execution failed; SQL and credentials were not logged"
+            exit 1
+          fi
+          echo "New site database grant created"
+
+          echo "Verifying database authentication from the running ERP backend"
+          docker exec -i deploy-backend-1 /home/frappe/frappe-bench/env/bin/python - <<'PY'
+          import json
+          from pathlib import Path
+          import MySQLdb
+
+          base = Path("/home/frappe/frappe-bench/sites")
+          cfg = json.loads((base / "armember.ir/site_config.json").read_text())
+          common = json.loads((base / "common_site_config.json").read_text())
+          db = cfg["db_name"]
+          host = cfg.get("db_host") or common.get("db_host") or "db"
+          port = int(cfg.get("db_port") or common.get("db_port") or 3306)
+          try:
+              con = MySQLdb.connect(host=host, port=port, user=cfg.get("db_user") or db, passwd=cfg["db_password"], db=db, connect_timeout=8)
+              cur = con.cursor()
+              cur.execute("SELECT 1")
+              assert cur.fetchone()[0] == 1
+              con.close()
+          except MySQLdb.Error as exc:
+              print("ERP database login: FAILED code", exc.args[0])
+              raise SystemExit(1)
+          print("ERP database login: OK")
+          PY
+
+          echo "Verifying ERP HTTP response"
+          curl -fsS -o /dev/null --max-time 20 -w 'ERP direct HTTP status: %{http_code}\n' -H 'Host: armember.ir' http://127.0.0.1:8080/
+          curl -fsS -o /dev/null --max-time 20 -w 'ERP HTTPS HTTP status: %{http_code}\n' https://armember.ir/
