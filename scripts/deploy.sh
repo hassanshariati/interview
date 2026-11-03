@@ -7,5 +7,7 @@ docker compose config --quiet
 # --wait confirms db, API, and container nginx are healthy (Docker Compose v2).
 docker compose up -d --build --wait --wait-timeout 180
 docker compose ps
-curl --fail --silent --show-error http://127.0.0.1:"${APP_BIND_PORT:-18080}"/api/v1/health
+proxy_address="$(docker compose port proxy 8080 | head -n 1)"
+[[ -n "$proxy_address" ]] || { echo "Proxy port is not published" >&2; exit 1; }
+curl --fail --silent --show-error "http://${proxy_address}/api/v1/health"
 printf '\n'
