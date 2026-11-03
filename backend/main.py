@@ -126,7 +126,7 @@ def health():
 
 @app.post("/api/v1/auth/login")
 def login(payload: LoginIn, request: Request, response: Response, db: Session = Depends(get_db)):
-    login_rate_limit(request.client.host if request.client else "unknown")
+    login_rate_limit((request.client.host if request.client else "unknown") + ":" + str(payload.email).lower())
     user = check_credentials(db, str(payload.email), payload.password)
     if not user:
         raise HTTPException(401, "Invalid credentials or account temporarily locked")
