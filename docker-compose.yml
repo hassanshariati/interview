@@ -1,0 +1,46 @@
+name: interview-ai
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: interview
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: interview
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U interview -d interview"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - interview_postgres:/var/lib/postgresql/data
+    networks: [private]
+    security_opt: ["no-new-privileges:true"]
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://interview:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/interview
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18080:8000"
+    networks: [private, outbound]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health',timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+volumes:
+  interview_postgres:
+networks:
+  private:
+    internal: true
+  outbound: {}
