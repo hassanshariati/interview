@@ -48,9 +48,11 @@ def bootstrap_admin():
         db.commit()
 
 
-def login_rate_limit(ip: str):
-    # Per-process safety net. Put an upstream rate limit at Nginx for production.
-    entries = _ATTEMPTS[ip]
+def login_rate_limit(ip_and_account: str):
+    # Account-scoped safety net behind a reverse proxy: avoid a shared IP
+    # exhausting the login budget for every employee. Keep ingress rate limits too.
+    key = hashlib.sha256(ip_and_account.strip().lower().encode()).hexdigest()
+    entries = _ATTEMPTS[key]
     current = now()
     while entries and entries[0] < current - 300:
         entries.popleft()
@@ -109,7 +111,7 @@ def require_admin(request: Request, db: Session = Depends(get_db)):
             email, password = raw.split(":", 1)
         except (ValueError, UnicodeError, binascii.Error):
             raise HTTPException(401, "Invalid HTTP Basic credentials", headers={"WWW-Authenticate": 'Basic realm="Interview Admin"'})
-        login_rate_limit(request.client.host if request.client else "unknown")
+        login_rate_limit((request.client.host if request.client else "unknown") + ":" + email.lower())
         account = check_credentials(db, email, password)
         if not account:
             raise HTTPException(401, "Invalid credentials", headers={"WWW-Authenticate": 'Basic realm="Interview Admin"'})
