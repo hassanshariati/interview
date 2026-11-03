@@ -86,3 +86,19 @@ def test_bad_origin_blocked():
     with TestClient(app) as client:
         result = client.post("/api/v1/auth/login", json={"email": "admin@example.com", "password": "x"}, headers={"Origin": "https://evil.example"})
         assert result.status_code == 403
+
+
+def test_login_throttle_account_isolation():
+    from fastapi import HTTPException
+    from backend.auth import _ATTEMPTS, login_rate_limit
+    _ATTEMPTS.clear()
+    for _ in range(20):
+        login_rate_limit("172.16.0.10:alice@example.com")
+    try:
+        login_rate_limit("172.16.0.10:alice@example.com")
+        assert False, "the account must be rate-limited"
+    except HTTPException as err:
+        assert err.status_code == 429
+    # Both accounts arrive from the same reverse proxy IP; neither should lock the other.
+    login_rate_limit("172.16.0.10:bob@example.com")
+    _ATTEMPTS.clear()
