@@ -1,0 +1,76 @@
+name: Temporary ERP database incident diagnosis
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/erp-incident-check.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: erp-incident-check
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Read-only ERPNext / MariaDB checks on host
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    steps:
+      - name: Diagnose ERP without modifying containers or secrets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo '=== Host runner ==='
+          id
+          docker info >/dev/null
+          echo '=== Relevant containers ==='
+          docker ps --format 'table {{.Names}}\t{{.Status}}' | grep -E 'NAMES|deploy-(db|backend|frontend|caddy)-1' || true
+          echo '=== Site config and application authentication ==='
+          docker exec -i deploy-backend-1 /home/frappe/frappe-bench/env/bin/python - <<'PY'
+          import json
+          from pathlib import Path
+          import MySQLdb
+
+          base = Path("/home/frappe/frappe-bench/sites")
+          common = base / "common_site_config.json"
+          global_cfg = json.loads(common.read_text()) if common.exists() else {}
+          sites = sorted(base.glob("*/site_config.json"))
+          print("Site configs found:", len(sites))
+          for file in sites:
+              c = json.loads(file.read_text())
+              db = c.get("db_name")
+              username = c.get("db_user") or db
+              host = c.get("db_host") or global_cfg.get("db_host") or "db"
+              port = int(c.get("db_port") or global_cfg.get("db_port") or 3306)
+              pw = c.get("db_password")
+              print("Site:", file.parent.name, "DB:", db, "DB user:", username, "DB host:", host)
+              print("Site password configured:", bool(pw))
+              if not (db and username and pw):
+                  print("Site auth result: INCOMPLETE_CONFIG")
+                  continue
+              try:
+                  conn = MySQLdb.connect(host=host, port=port, user=username, passwd=pw, db=db, connect_timeout=5)
+                  conn.close()
+                  print("Site auth result: OK")
+              except MySQLdb.Error as e:
+                  print("Site auth result: MYSQL_ERROR_CODE", e.args[0])
+          PY
+          echo '=== MariaDB root auth and site DB / user metadata ==='
+          docker exec deploy-db-1 sh -c '
+            if [ ! -s /run/secrets/db_root_password ]; then
+              echo "Root secret is absent"
+              exit 0
+            fi
+            export MYSQL_PWD="$(cat /run/secrets/db_root_password)"
+            if mariadb --protocol=socket -uroot -N -e "SELECT 1" >/dev/null 2>&1; then
+              echo "MariaDB root auth: OK"
+              mariadb --protocol=socket -uroot -N -e "SELECT CONCAT(\"DB_COUNT=\",COUNT(*)) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=\"_8d8877e7c7a80d3d\"; SELECT CONCAT(\"ACCOUNT_HOST=\",Host,\" PLUGIN=\",plugin) FROM mysql.user WHERE User=\"_8d8877e7c7a80d3d\";"
+            else
+              echo "MariaDB root auth with current secret: FAILED"
+            fi
+          '
+          echo '=== Direct ERP response ==='
+          curl -sS -o /dev/null --max-time 8 -w 'Direct ERP HTTP status: %{http_code}\n' -H 'Host: armember.ir' http://127.0.0.1:8080/ || true
