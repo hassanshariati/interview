@@ -1,4 +1,8 @@
 name: interview-ai
+
+# Default: PostgreSQL + FastAPI + nginx on 127.0.0.1:18080.
+# The host's existing nginx should terminate TLS for interview.armember.ir.
+# Optional: --profile standalone-https enables Caddy on ports 80/443 ONLY when free.
 services:
   db:
     image: postgres:17-alpine
@@ -7,17 +11,23 @@ services:
       POSTGRES_USER: interview
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: interview
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      - interview_postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U interview -d interview"]
       interval: 10s
       timeout: 3s
       retries: 10
-    volumes:
-      - interview_postgres:/var/lib/postgresql/data
-    networks: [private]
+    networks: [database]
     security_opt: ["no-new-privileges:true"]
+    shm_size: 128mb
+    pids_limit: 256
+
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     restart: unless-stopped
     env_file: .env
     environment:
@@ -25,22 +35,77 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:18080:8000"
-    networks: [private, outbound]
+    expose:
+      - "8000"
+    networks: [database, frontend, egress]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
     read_only: true
-    tmpfs: [/tmp]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     pids_limit: 256
+    init: true
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health',timeout=3)"]
       interval: 20s
       timeout: 5s
       retries: 5
+      start_period: 20s
+
+  proxy:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    user: "101:101"
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${APP_BIND_PORT:-18080}:8080"
+    volumes:
+      - ./deploy/nginx/container.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [frontend]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:rw,nosuid,size=32m,uid=101,gid=101
+      - /var/run:rw,nosuid,size=2m,uid=101,gid=101
+      - /tmp:rw,noexec,nosuid,size=16m,uid=101,gid=101
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  # Optional ONLY when the host has no other service binding ports 80/443.
+  # Enables automatic HTTPS in this same compose file:
+  # docker compose --profile standalone-https up -d --build
+  edge:
+    image: caddy:2-alpine
+    profiles: [standalone-https]
+    restart: unless-stopped
+    depends_on:
+      proxy:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - interview_caddy_data:/data
+      - interview_caddy_config:/config
+    networks: [frontend]
+    security_opt: ["no-new-privileges:true"]
+
 volumes:
   interview_postgres:
+  interview_caddy_data:
+  interview_caddy_config:
+
 networks:
-  private:
+  database:
     internal: true
-  outbound: {}
+  frontend: {}
+  egress: {}
