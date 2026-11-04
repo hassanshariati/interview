@@ -6,6 +6,16 @@ from pypdf import PdfReader
 ACCEPTED = {".pdf", ".docx", ".txt"}
 MAX_BYTES = 8 * 1024 * 1024
 
+# PostgreSQL rejects NUL bytes in text. PDF extractors can return NULs
+# and invalid Unicode codepoints, even for a legitimate resume.
+_CONTROL_CHARS = {i: None for i in range(32) if i not in (9, 10, 13)}
+
+
+def clean_text(value: str) -> str:
+    """Normalize extracted text for PostgreSQL while keeping readable lines."""
+    return value.translate(_CONTROL_CHARS).encode("utf-8", errors="replace").decode("utf-8")
+
+
 def parse_cv(filename: str, data: bytes) -> str:
     suffix = Path(filename).suffix.lower()
     if suffix not in ACCEPTED:
@@ -26,7 +36,7 @@ def parse_cv(filename: str, data: bytes) -> str:
         text = "\n".join([p.text for p in doc.paragraphs] + [c.text for t in doc.tables for row in t.rows for c in row.cells])
     else:
         text = data.decode("utf-8-sig", errors="strict")
-    text = text[:200_000].strip()
+    text = clean_text(text)[:200_000].strip()
     if not text:
         raise ValueError("No extractable text. Scanned documents require an OCR phase.")
     return text

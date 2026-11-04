@@ -12,11 +12,12 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.orm import Session
 from . import models
 from .auth import SESSION_COOKIE, bootstrap_admin, check_credentials, digest, login_rate_limit, new_session, now, ph, require_admin, session_for_request
-from .cv_parser import MAX_BYTES, parse_cv
+from .cv_parser import MAX_BYTES, clean_text, parse_cv
+from .interview_context import build_interview_instructions
 from .db import Base, engine, get_db
 from .emailer import send_email
 from .matching import classify, match_job
@@ -32,7 +33,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Interview AI", version="0.3.1", lifespan=lifespan)
+app = FastAPI(title="Interview AI", version="0.3.2", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 
 
@@ -130,7 +131,7 @@ def candidate_page():
 
 @app.get("/api/v1/health")
 def health():
-    return {"status": "ok", "version": "0.3.1"}
+    return {"status": "ok", "version": "0.3.2"}
 
 
 @app.post("/api/v1/auth/login")
@@ -283,20 +284,25 @@ async def self_apply(job_id: int = Form(gt=0), full_name: str = Form(min_length=
             raise HTTPException(422, str(exc)) from exc
         except Exception as exc:
             raise HTTPException(422, "Cannot parse document") from exc
-        filename = Path(file.filename).name[:255]
-    candidate = models.Candidate(full_name=full_name.strip(), email=normalized_email, source_filename=filename,
-                                 cv_text=cv_text, job_families=classify(cv_text) if cv_text else [])
-    db.add(candidate)
-    db.flush()
-    token = secrets.token_urlsafe(48)
-    current = datetime.now(timezone.utc).isoformat()
-    inv = models.Invitation(candidate_id=candidate.id, job_id=job.id, token_digest=digest(token),
-                            slots=[current], selected_slot=current, status="confirmed",
-                            expires_at=now() + 2 * 60 * 60, created_at=now())
-    db.add(inv)
-    db.flush()
-    audit(db, None, "application.self_start", str(inv.id))
-    db.commit()
+        filename = clean_text(Path(file.filename).name)[:255]
+    try:
+        candidate = models.Candidate(full_name=clean_text(full_name).strip(), email=normalized_email, source_filename=filename,
+                                     cv_text=cv_text, job_families=classify(cv_text) if cv_text else [])
+        db.add(candidate)
+        db.flush()
+        token = secrets.token_urlsafe(48)
+        current = datetime.now(timezone.utc).isoformat()
+        inv = models.Invitation(candidate_id=candidate.id, job_id=job.id, token_digest=digest(token),
+                                slots=[current], selected_slot=current, status="confirmed",
+                                expires_at=now() + 2 * 60 * 60, created_at=now())
+        db.add(inv)
+        db.flush()
+        audit(db, None, "application.self_start", str(inv.id))
+        db.commit()
+    except DataError as exc:
+        db.rollback()
+        # Never reveal the exception: SQL parameters can contain private CV text.
+        raise HTTPException(422, "Unsupported characters in CV or form fields") from exc
     # Token is in a fragment, never the HTTP path or query; it grants access to this interview only.
     return {"interview_path": "/candidate/#" + token, "job_title": job.title,
             "expires_in_seconds": 7200, "note": "This link is private; your email has not been verified."}
@@ -319,12 +325,16 @@ async def upload_cv(full_name: str = Form(min_length=2, max_length=180), email: 
     except Exception as exc:
         raise HTTPException(422, "Cannot parse document") from exc
     families = classify(text)
-    candidate = models.Candidate(full_name=full_name, email=str(email), source_filename=Path(file.filename or "cv").name[:255],
-                                 cv_text=text, job_families=families)
-    db.add(candidate)
-    db.flush()
-    audit(db, user.id, "candidate.upload", str(candidate.id))
-    db.commit()
+    try:
+        candidate = models.Candidate(full_name=clean_text(full_name).strip(), email=str(email), source_filename=clean_text(Path(file.filename or "cv").name)[:255],
+                                     cv_text=text, job_families=families)
+        db.add(candidate)
+        db.flush()
+        audit(db, user.id, "candidate.upload", str(candidate.id))
+        db.commit()
+    except DataError as exc:
+        db.rollback()
+        raise HTTPException(422, "Unsupported characters in CV or form fields") from exc
     db.refresh(candidate)
     return {"id": candidate.id, "full_name": candidate.full_name, "job_families": families, "extracted_characters": len(text)}
 
@@ -469,8 +479,12 @@ def list_invitations(db: Session = Depends(get_db), user=Depends(require_admin))
 def public_lookup(payload: TokenIn, db: Session = Depends(get_db)):
     inv = get_invitation(db, payload.token)
     c, job = db.get(models.Candidate, inv.candidate_id), db.get(models.Job, inv.job_id)
+    evidence = match_job(c.cv_text or "", job.required_skills or [])
     return {"job": job.title, "candidate": c.full_name, "slots": inv.slots, "selected_slot": inv.selected_slot,
-            "status": inv.status, "consent": bool(inv.consent_at), "voice_enabled": bool(os.getenv("OPENAI_API_KEY", "").strip()) and
+            "status": inv.status, "consent": bool(inv.consent_at),
+            "cv_received": bool(c.cv_text),
+            "cv_skill_mentions": [item["skill"] for item in evidence["mentioned_skills"]][:8],
+            "voice_enabled": bool(os.getenv("OPENAI_API_KEY", "").strip()) and
                              os.getenv("ENABLE_REALTIME", "false").lower() == "true"}
 
 
@@ -510,18 +524,23 @@ def public_consent(payload: ConsentIn, db: Session = Depends(get_db)):
     return {"consent": True}
 
 
-async def realtime_secret(instructions: str):
+async def realtime_secret(instructions: str, safety_identifier: str | None = None):
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key or os.getenv("ENABLE_REALTIME", "false").lower() != "true":
         raise HTTPException(503, "Realtime voice service is not enabled")
     config = {"expires_after": {"anchor": "created_at", "seconds": 90},
-              "session": {"type": "realtime", "model": os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime"),
+              "session": {"type": "realtime", "model": os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1"),
                           "instructions": instructions,
-                          "audio": {"input": {"transcription": {"model": "gpt-transcribe"}}}}}
+                          "audio": {"input": {"transcription": {"model": "gpt-transcribe"}},
+                                    "output": {"voice": "marin"}}}}
+    headers = {"Authorization": f"Bearer {api_key}"}
+    if safety_identifier:
+        # Hash an internal identifier, never email or CV data.
+        headers["OpenAI-Safety-Identifier"] = digest(safety_identifier)
     try:
         async with httpx.AsyncClient(timeout=25) as client:
             resp = await client.post("https://api.openai.com/v1/realtime/client_secrets", json=config,
-                                     headers={"Authorization": f"Bearer {api_key}"})
+                                     headers=headers)
             resp.raise_for_status()
             result = resp.json()
     except httpx.HTTPError as exc:
@@ -545,16 +564,9 @@ async def candidate_voice(payload: TokenIn, db: Session = Depends(get_db)):
     if not (selected - timedelta(minutes=30) <= current <= selected + timedelta(hours=2)):
         raise HTTPException(403, "Voice interview is available from 30 minutes before until 2 hours after the booked time")
     job = db.get(models.Job, inv.job_id)
-    skills = ", ".join(s[:100] for s in job.required_skills[:20])
-    instructions = (
-        "You are an interviewer in a voluntary PRACTICE hiring interview. Speak Persian if the candidate speaks Persian, otherwise English. "
-        "Ask one technical question at a time and follow up on the candidate's content; cover applied troubleshooting and scenario reasoning. "
-        f"The recruiter-selected competencies are: {skills}. "
-        "Do not ask about protected attributes or infer stress, emotions, honesty, health, personality or disability from voice. "
-        "Do not make a hiring decision or assign a score. Kindly allow the candidate to pause or request a repeat. "
-        "Aim for 10-15 minutes. Start by greeting and asking a relevant technical question."
-    )
-    secret = await realtime_secret(instructions)
+    candidate = db.get(models.Candidate, inv.candidate_id)
+    instructions = build_interview_instructions(job, candidate)
+    secret = await realtime_secret(instructions, safety_identifier="candidate:" + str(candidate.id))
     inv.voice_sessions += 1
     db.commit()
     return secret

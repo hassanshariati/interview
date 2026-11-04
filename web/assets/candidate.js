@@ -15,6 +15,9 @@ async function refresh() {
     if(!token||token.length<30)throw Error("لینک خصوصی معتبر نیست.");
     const inv=await api("lookup");
     $("details").textContent=inv.candidate+" — "+inv.job;
+    $("cv-status").textContent=inv.cv_received?
+      "رزومه شما خوانده شد. موضوعات مرتبط: "+(inv.cv_skill_mentions.length?inv.cv_skill_mentions.join("، "):"پروژه‌ها و تجربه‌های درج‌شده در رزومه"):
+      "رزومه‌ای دریافت نشده؛ سؤال‌ها بر اساس مهارت‌های شغل و توضیحات شما خواهند بود.";
     $("choose").hidden=inv.status!=="pending";
     $("voice").hidden=inv.status!=="confirmed";
     if(inv.status==="finished"){status("مصاحبه پایان یافته و جهت بررسی انسانی ثبت شده است.");return;}
@@ -31,7 +34,7 @@ async function refresh() {
     }
     $("consent").checked=inv.consent;
     $("start").disabled=!inv.voice_enabled;
-    if(!inv.voice_enabled)$("rtc-status").textContent="مصاحبه صوتی هنوز در سرور فعال نشده؛ می‌توانی پاسخ متنی ثبت کنی.";
+    if(!inv.voice_enabled)$("rtc-status").textContent="اتصال صوتی AI هنوز روی سرور پیکربندی نشده است. ثبت متن دستی جایگزین مصاحبه AI نیست.";
   }catch(error){status(error.message);$("choose").hidden=true;$("voice").hidden=true;}
 }
 $("confirm").addEventListener("click",async()=>{
@@ -84,6 +87,7 @@ $("start").addEventListener("click",async()=>{
     channel.onmessage=event=>{
       try {
         const data=JSON.parse(event.data);
+        if(data.type==="error"){$("rtc-status").textContent="خطای سرویس صوتی: "+(data.error?.message||"ارتباط ناموفق بود");return;}
         if(data.type==="conversation.item.input_audio_transcription.completed")
           save("candidate",data.transcript).catch(()=>{status("ثبت بخشی از متن ناموفق بود.");});
         if(data.type==="response.output_audio_transcript.done")

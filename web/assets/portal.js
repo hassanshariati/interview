@@ -79,9 +79,12 @@ $("apply-form").addEventListener("submit",async event=>{
   const button=$("submit-apply"),error=$("apply-error");
   error.textContent="";button.disabled=true;button.textContent="در حال ثبت درخواست…";
   try {
+    const file=$("apply-file").files?.[0];
+    if(file&&file.size>8*1024*1024)throw Error("رزومه باید کمتر از ۸ مگابایت باشد.");
     const response=await fetch("/api/v1/public/applications",{method:"POST",
       credentials:"same-origin",body:new FormData(event.currentTarget)});
     const data=await response.json().catch(()=>({detail:"پاسخ نامعتبر سرویس"}));
+    if(response.status>=500)throw Error("سرویس ثبت رزومه موقتاً پاسخ نمی‌دهد؛ دوباره تلاش کن.");
     if(!response.ok)throw Error(typeof data.detail==="string"?data.detail:"ثبت درخواست موفق نبود");
     if(typeof data.interview_path!=="string"||!data.interview_path.startsWith("/candidate/#"))
       throw Error("لینک مصاحبه نامعتبر است");
