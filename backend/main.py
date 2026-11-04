@@ -20,7 +20,8 @@ from .cv_parser import MAX_BYTES, clean_text, parse_cv
 from .interview_context import build_interview_instructions
 from .db import Base, engine, get_db
 from .emailer import send_email
-from .deepseek import configured as deepseek_configured, generate_question
+from .deepseek import configured as deepseek_configured, generate_question as deepseek_generate_question
+from .gapgpt import configured as gapgpt_configured, generate_question as gapgpt_generate_question
 from .matching import classify, match_job
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -34,7 +35,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Interview AI", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Interview AI", version="0.4.1", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 
 
@@ -106,6 +107,24 @@ class AITurnIn(TokenIn):
     text: str | None = Field(default=None, min_length=1, max_length=2000)
 
 
+def chat_provider() -> str:
+    return os.getenv("LLM_PROVIDER", "openai").strip().lower()
+
+
+def chat_configured() -> bool:
+    provider = chat_provider()
+    return ((provider == "deepseek" and deepseek_configured())
+            or (provider == "gapgpt" and gapgpt_configured()))
+
+
+async def generate_question(instructions: str, previous: list[dict], answer: str | None) -> str:
+    if chat_provider() == "gapgpt":
+        return await gapgpt_generate_question(instructions, previous, answer)
+    if chat_provider() == "deepseek":
+        return await deepseek_generate_question(instructions, previous, answer)
+    raise HTTPException(503, "A text interview provider has not been configured")
+
+
 def audit(db, user_id, action, resource):
     db.add(models.AuditEvent(user_id=user_id, action=action, resource=resource, created_at=now()))
 
@@ -136,7 +155,7 @@ def candidate_page():
 
 @app.get("/api/v1/health")
 def health():
-    return {"status": "ok", "version": "0.4.0"}
+    return {"status": "ok", "version": "0.4.1"}
 
 
 @app.post("/api/v1/auth/login")
@@ -485,18 +504,19 @@ def public_lookup(payload: TokenIn, db: Session = Depends(get_db)):
     inv = get_invitation(db, payload.token)
     c, job = db.get(models.Candidate, inv.candidate_id), db.get(models.Job, inv.job_id)
     evidence = match_job(c.cv_text or "", job.required_skills or [])
-    deepseek_mode = os.getenv("LLM_PROVIDER", "").strip().lower() == "deepseek"
+    provider = chat_provider()
+    chat_mode = provider in ("deepseek", "gapgpt")
     prior_ai = [entry for entry in (inv.transcript or [])
                 if entry.get("source") in ("server_llm", "candidate_ai")] if inv.consent_at else []
     return {"job": job.title, "candidate": c.full_name, "slots": inv.slots, "selected_slot": inv.selected_slot,
             "status": inv.status, "consent": bool(inv.consent_at),
             "cv_received": bool(c.cv_text),
             "cv_skill_mentions": [item["skill"] for item in evidence["mentioned_skills"]][:8],
-            "ai_provider": "deepseek" if deepseek_mode else "openai",
-            "ai_enabled": deepseek_configured() if deepseek_mode else False,
+            "ai_provider": provider if chat_mode else "openai",
+            "ai_enabled": chat_configured() if chat_mode else False,
             "ai_messages": [{"role": entry["role"], "text": entry["text"]}
                             for entry in prior_ai[-24:]],
-            "voice_enabled": not deepseek_mode and bool(os.getenv("OPENAI_API_KEY", "").strip()) and
+            "voice_enabled": not chat_mode and bool(os.getenv("OPENAI_API_KEY", "").strip()) and
                              os.getenv("ENABLE_REALTIME", "false").lower() == "true"}
 
 
@@ -587,8 +607,8 @@ async def candidate_voice(payload: TokenIn, db: Session = Depends(get_db)):
 @app.post("/api/v1/public/invitation/ai-turn")
 async def candidate_ai_turn(payload: AITurnIn, db: Session = Depends(get_db)):
     """Bounded, authenticated interview turn; no API key or unredacted CV reaches the browser."""
-    if not deepseek_configured():
-        raise HTTPException(503, "DeepSeek is not configured on this server")
+    if not chat_configured():
+        raise HTTPException(503, "Text interview provider is not configured on this server")
     invitation = db.scalar(select(models.Invitation).where(
         models.Invitation.token_digest == digest(payload.token)).with_for_update())
     if not invitation or invitation.expires_at < now():
@@ -618,7 +638,7 @@ async def candidate_ai_turn(payload: AITurnIn, db: Session = Depends(get_db)):
         raise HTTPException(429, "Interview transcript limit reached")
     hourly_cap = max(1, min(500, int(os.getenv("AI_QUESTIONS_PER_HOUR", "80"))))
     count = db.scalars(select(models.AuditEvent.id).where(
-        models.AuditEvent.action == "ai.deepseek_turn",
+        models.AuditEvent.action.in_(("ai.deepseek_turn", "ai.chat_turn")),
         models.AuditEvent.created_at >= now() - 3600).limit(hourly_cap)).all()
     if len(count) >= hourly_cap:
         raise HTTPException(429, "AI service capacity reached; please retry later")
@@ -634,7 +654,7 @@ async def candidate_ai_turn(payload: AITurnIn, db: Session = Depends(get_db)):
     transcript.append({"role": "interviewer", "source": "server_llm",
                        "text": question, "saved_at": stamped})
     invitation.transcript = transcript
-    audit(db, None, "ai.deepseek_turn", str(invitation.id))
+    audit(db, None, "ai.chat_turn", str(invitation.id))
     db.commit()
     return {"question": question, "turn_count": len(ai_questions) + 1,
             "already_started": False}

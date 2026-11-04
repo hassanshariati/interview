@@ -227,3 +227,42 @@ If the page reports **DeepSeek not configured**, verify the API container has
 received the server-only environment variables (print only booleans; do NOT
 print the key). If a provider call returns an error, verify DeepSeek account
 credit, key validity, DNS egress and the account's permitted API models.
+
+
+## GapGPT provider (v0.4.1)
+
+GapGPT can be selected **instead of** DeepSeek for the existing CV-grounded
+interview pipeline. The configured endpoint must be exactly
+`https://api.gapgpt.app/v1` and the server sends standard, non-streaming
+`POST /chat/completions` requests. Configure on the production host:
+
+```dotenv
+LLM_PROVIDER=gapgpt
+GAPGPT_API_KEY=your-private-API-key
+GAPGPT_BASE_URL=https://api.gapgpt.app/v1
+GAPGPT_MODEL=gpt-4o-mini
+```
+
+The model above is an example: use the exact model ID enabled for **your**
+GapGPT account. API usage, costs and model availability depend on the provider;
+free chat on a website does not imply free API credits. Never publish the key
+or copy it into `DEEPSEEK_API_KEY`.
+
+```bash
+cd /opt/interview-ai
+docker compose up -d --force-recreate api
+docker compose exec -T api python -c 'from backend.gapgpt import configured; print("GAPGPT_READY="+str(configured()))'
+```
+
+`GAPGPT_READY=True` checks that environment variables are present; it does
+**not** prove the API key is valid or the account has credits. If the selected
+model is rejected, check the provider's dashboard and change
+`GAPGPT_MODEL`; errors are returned without leaking the token to candidates.
+
+The candidate interview still requires an unexpired private link and consent.
+Only professional excerpts from the CV (not the full document) are sent to
+the selected model for practical interview follow-ups. The optional audio
+experience is provided by browser speech recognition / speech synthesis, **not**
+native low-latency realtime audio through GapGPT. Some browsers use remote
+speech-to-text providers; test with fictitious CVs and review the privacy terms
+of both services before allowing real candidates.
