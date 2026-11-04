@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [feature/job-portal-admin-dashboard, fix/admin-login-demo-seed-voice, fix/resume-postgres-and-contextual-voice, feature/deepseek-resume-interview, feature/gapgpt-chat-provider, fix/persian-interview-questions, feature/push-to-talk-and-interview-review, fix/persian-audio-long-answers, fix/review-full-voice-transcript-before-send]
+    branches: [feature/job-portal-admin-dashboard, fix/admin-login-demo-seed-voice, fix/resume-postgres-and-contextual-voice, feature/deepseek-resume-interview, feature/gapgpt-chat-provider, fix/persian-interview-questions, feature/push-to-talk-and-interview-review, fix/persian-audio-long-answers, fix/review-full-voice-transcript-before-send, fix/stt-retry-and-diagnostics]
 
 permissions:
   contents: read
