@@ -195,3 +195,56 @@ def test_manager_email_notification_sent_on_finish():
             assert args[0] == "manager@example.com"
             assert "Notification Candidate" in args[2]
             assert "transcript" not in args[2].lower()
+
+
+
+def test_demo_seed_idempotent_and_isolated_from_real_scores():
+    from backend.db import SessionLocal
+    from backend.seed_demo import JOBS, PEOPLE, seed
+    with TestClient(app) as client:
+        with SessionLocal() as db:
+            first = seed(db)
+            second = seed(db)
+        assert first == {"jobs": len(JOBS), "candidates": len(PEOPLE),
+                         "interviews": len(PEOPLE), "mock_ratings": 6}
+        assert second == {"jobs": 0, "candidates": 0, "interviews": 0, "mock_ratings": 0}
+
+        jobs = client.get("/api/v1/public/jobs").json()
+        demo_jobs = [job for job in jobs if job.get("is_demo")]
+        assert len(demo_jobs) == len(JOBS)
+        assert all(job["title"].startswith("[نمونه]") for job in demo_jobs)
+        assert not any("@" in job["description"] for job in demo_jobs)
+        login = client.post("/api/v1/auth/login", json={
+            "email": "admin@example.com", "password": "sufficiently-long-test-admin-password"})
+        assert login.status_code == 200
+        dashboard = client.get("/api/v1/admin/analytics").json()
+        assert dashboard["counts"]["demo_candidates"] == len(PEOPLE)
+        assert dashboard["counts"]["demo_interviews"] == len(PEOPLE)
+        assert dashboard["counts"]["demo_assessments"] == 6
+        assert sum(item["count"] for item in dashboard["demo_competencies"]) == 6
+        assert all("is_demo" in item for item in dashboard["recent"])
+        example = next(item for item in dashboard["recent"] if item["is_demo"])
+        assert example["human_ratings"] == 0
+        assert any(person["is_demo"] for person in client.get("/api/v1/candidates").json())
+
+
+def test_voice_button_needs_both_enable_flag_and_key():
+    from backend.seed_demo import JOBS
+    from backend.db import SessionLocal
+    from backend.seed_demo import seed
+    with TestClient(app) as client:
+        with SessionLocal() as db:
+            seed(db)
+        jobs = client.get("/api/v1/public/jobs").json()
+        job_id = next(j["id"] for j in jobs if j["title"] == JOBS[0][0])
+        response = client.post("/api/v1/public/applications", data={
+            "job_id": str(job_id), "full_name": "Voice Flag Test", "email": "voice-flag@example.com"})
+        assert response.status_code == 200, response.text
+        token = response.json()["interview_path"].split("#")[1]
+        with patch.dict(os.environ, {"ENABLE_REALTIME": "true", "OPENAI_API_KEY": ""}):
+            lookup = client.post("/api/v1/public/invitation/lookup", json={"token": token})
+            assert lookup.status_code == 200
+            assert lookup.json()["voice_enabled"] is False
+        with patch.dict(os.environ, {"ENABLE_REALTIME": "true", "OPENAI_API_KEY": "dummy-key"}):
+            lookup = client.post("/api/v1/public/invitation/lookup", json={"token": token})
+            assert lookup.json()["voice_enabled"] is True
