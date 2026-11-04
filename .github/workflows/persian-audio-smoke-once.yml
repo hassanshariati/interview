@@ -1,0 +1,62 @@
+name: One-time production Persian speech plus full-clip transcription smoke test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/persian-audio-smoke-once.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  voice:
+    runs-on: [self-hosted, Linux, X64]
+    environment: production
+    timeout-minutes: 6
+    steps:
+      - name: Test synthetic Persian speech and transcription only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /opt/interview-ai
+          docker compose exec -T api python - <<'PY'
+          import asyncio, os, httpx
+          from backend.interview_audio import persian_question_mp3
+          from backend.gapgpt import gapgpt_config
+          from fastapi import HTTPException
+          print("HEALTH_CODE_VERSION=0.5.1")
+          try:
+              from backend.main import app
+              print("API_VERSION="+app.version)
+              mp3=asyncio.run(persian_question_mp3(
+                  "سلام! لطفاً درباره تجربه یک پروژه واقعی با کوبرنتیز توضیح بده."))
+              print("PERSIAN_TTS_SUCCESS="+str(len(mp3)>256))
+              print("PERSIAN_TTS_AUDIO_BYTES="+str(len(mp3)))
+          except HTTPException as exc:
+              print("PERSIAN_TTS_SUCCESS=False")
+              print("PERSIAN_TTS_HTTP_ERROR="+str(exc.status_code))
+              mp3=None
+          except Exception as exc:
+              print("PERSIAN_TTS_SUCCESS=False")
+              print("PERSIAN_TTS_EXCEPTION="+type(exc).__name__)
+              mp3=None
+          if not mp3:
+              raise SystemExit(0)
+          try:
+              key,model,base=gapgpt_config()
+              with httpx.Client(timeout=70,follow_redirects=False) as client:
+                  resp=client.post(base+"/audio/transcriptions",
+                      headers={"Authorization":"Bearer "+key},
+                      files={"file":("synthetic-persian.mp3",mp3,"audio/mpeg")},
+                      data={"model":os.getenv("GAPGPT_STT_MODEL","whisper-1"),
+                            "language":"fa","response_format":"json"})
+              print("GAPGPT_FULL_AUDIO_STT_HTTP_STATUS="+str(resp.status_code))
+              if resp.status_code==200:
+                  data=resp.json()
+                  print("GAPGPT_STT_TEXT_PRESENT="+str(bool(data.get("text","").strip())))
+          except httpx.TimeoutException:
+              print("GAPGPT_FULL_AUDIO_STT=TIMEOUT")
+          except Exception as exc:
+              print("GAPGPT_FULL_AUDIO_STT_EXCEPTION="+type(exc).__name__)
+          PY
