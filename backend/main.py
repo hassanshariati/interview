@@ -68,10 +68,6 @@ class JobIn(BaseModel):
     required_skills: list[str] = Field(min_length=1, max_length=60)
 
 
-class SelfApplicationIn(BaseModel):
-    """Metadata only; CV files use the multipart endpoint."""
-
-
 class AssessmentIn(BaseModel):
     candidate_id: int
     job_id: int
@@ -258,6 +254,14 @@ async def self_apply(job_id: int = Form(gt=0), full_name: str = Form(min_length=
         raise HTTPException(404, "Job not found")
     normalized_email = str(email).strip().lower()
     last_day = datetime.now(timezone.utc) - timedelta(hours=24)
+    # Database-backed hourly ceiling: protects paid Realtime provisioning even if
+    # a hostile client rotates email addresses (proxy-level limits are also advised).
+    hourly_cap = max(1, min(200, int(os.getenv("PUBLIC_APPLICATIONS_PER_HOUR", "20"))))
+    attempts = db.scalars(select(models.AuditEvent.id).where(
+        models.AuditEvent.action == "application.self_start",
+        models.AuditEvent.created_at >= now() - 3600).limit(hourly_cap)).all()
+    if len(attempts) >= hourly_cap:
+        raise HTTPException(429, "Public interview capacity reached; please retry later")
     recent = db.scalars(select(models.Candidate.id).where(
         models.Candidate.email == normalized_email, models.Candidate.created_at >= last_day).limit(3)).all()
     if len(recent) >= 3:

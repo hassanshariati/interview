@@ -86,8 +86,8 @@ $("apply-form").addEventListener("submit",async event=>{
     if(typeof data.interview_path!=="string"||!data.interview_path.startsWith("/candidate/#"))
       throw Error("لینک مصاحبه نامعتبر است");
     location.assign(data.interview_path);
-  } catch (error) {
-    error.textContent=error.message||"خطا در اتصال به سرویس";
+  } catch (cause) {
+    error.textContent=cause.message||"خطا در اتصال به سرویس";
   } finally {button.disabled=false;button.textContent="ورود به مصاحبه ←";}
 });
 (async function loadJobs() {
