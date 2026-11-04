@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException
+from .persian import PERSIAN_QUESTION_RULE
 
 _MODEL_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,95}$")
 _PLACEHOLDERS = {"", "YOUR_GAPGPT_API_KEY", "YOUR_API_KEY", "YOUR_REAL_API_KEY"}
@@ -40,9 +41,9 @@ def gapgpt_config() -> tuple[str, str, str]:
 async def generate_question(instructions: str, prior_turns: list[dict],
                             latest_answer: str | None) -> str:
     key, model, base = gapgpt_config()
-    messages = [{"role": "system", "content": instructions
-                 + "\nAsk exactly ONE concise practical interview question; "
-                   "do not score or recommend an employment decision."}]
+    messages = [{"role": "system", "content": PERSIAN_QUESTION_RULE + "\n"
+                 + instructions
+                 + "\nOnly one relevant technical question. No scoring or hiring decision."}]
     for turn in prior_turns[-18:]:
         if turn.get("source") not in ("server_llm", "candidate_ai"):
             continue
@@ -52,8 +53,8 @@ async def generate_question(instructions: str, prior_turns: list[dict],
         })
     messages.append({"role": "user", "content": (
         latest_answer[:2000] if latest_answer is not None else
-        "Start the interview with one question about the practical technical experience "
-        "in my resume and the job requirements.")})
+        "مصاحبه را با سلام شروع کن و درباره یک پروژه یا تجربه فنی واقعی "
+        "مرتبط با رزومه و نیازهای شغل، یک سؤال کاربردی به فارسی بپرس.")})
     # Standard Chat Completions fields; DeepSeek-specific 'thinking' isn't portable.
     payload = {"model": model, "messages": messages, "max_tokens": 330, "stream": False}
     try:

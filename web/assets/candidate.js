@@ -5,6 +5,15 @@ let rtc=null,stream=null,recognition=null,known=new Set(),savedSomething=false;
 let aiProvider="openai",aiStarted=false,aiHistory=[],aiBusy=false,hasTranscript=false;
 const isChatProvider=()=>["deepseek","gapgpt"].includes(aiProvider);
 const aiName=()=>aiProvider==="gapgpt"?"GapGPT":"DeepSeek";
+function persianQuestion(text){
+  const fa=(String(text).match(/[\u0621-\u064A\u067E\u0686\u0698\u06A9\u06AF\u06CC]/g)||[]).length;
+  const en=(String(text).match(/[A-Za-z]/g)||[]).length;
+  return fa>=16&&fa>=en*0.65;
+}
+function needsPersianRepair(){
+  const last=[...aiHistory].reverse().find(item=>item.role==="interviewer");
+  return Boolean(last&&!persianQuestion(last.text));
+}
 const Recognition=window.SpeechRecognition||window.webkitSpeechRecognition;
 const canSpeak=typeof window.speechSynthesis!=="undefined"&&typeof window.SpeechSynthesisUtterance==="function";
 const addText=(line)=>{
@@ -30,7 +39,7 @@ function showHistory(items) {
     addText((item.role==="candidate"?"داوطلب: ":"مصاحبه‌گر AI: ")+item.text);
   if(!items.length)$("messages").textContent="بعد از شروع مصاحبه، سؤال‌ها و جواب‌ها اینجا نمایش داده می‌شوند.";
   aiStarted=items.some(item=>item.role==="interviewer");
-  $("start").textContent=aiStarted?"🎙 ضبط پاسخ صوتی":"شروع مصاحبه با "+aiName();
+  $("start").textContent=needsPersianRepair()?"بازنویسی سؤال به فارسی":(aiStarted?"🎙 ضبط پاسخ صوتی":"شروع مصاحبه فارسی با "+aiName());
 }
 function speaking(text) {
   if(!canSpeak){info("متن سؤال نمایش داده شد؛ این مرورگر تبدیل متن به صدا ندارد.");return;}
@@ -52,8 +61,13 @@ async function askAI(text=null) {
   info(text===null?"در حال آماده‌سازی سؤال اول…":"در حال تحلیل پاسخ و تولید سؤال بعدی…");
   try{
     const result=await api("ai-turn",text===null?{}:{text:String(text).trim()});
-    if(text!==null)aiHistory.push({role:"candidate",text:String(text).trim()});
-    if(text!==null||!aiStarted)aiHistory.push({role:"interviewer",text:result.question});
+    if(result.was_corrected){
+      const index=aiHistory.map(item=>item.role).lastIndexOf("interviewer");
+      if(index>=0)aiHistory[index]={role:"interviewer",text:result.question};
+    }else{
+      if(text!==null)aiHistory.push({role:"candidate",text:String(text).trim()});
+      if(text!==null||!aiStarted)aiHistory.push({role:"interviewer",text:result.question});
+    }
     showHistory(aiHistory);
     $("manual").value="";
     info("سؤال "+Number(result.turn_count).toLocaleString("fa-IR")+" آماده است. جواب را بگو یا بنویس.");
@@ -155,7 +169,7 @@ $("stop").addEventListener("click",()=>{stop();info("میکروفون و پخش 
 $("start").addEventListener("click",async()=>{
   if(!$("consent").checked){status("ابتدا با پردازش صدا و متن موافقت کن.");return;}
   if(isChatProvider()){
-    if(!aiStarted)await askAI();
+    if(!aiStarted||needsPersianRepair())await askAI();
     else listen();
     return;
   }

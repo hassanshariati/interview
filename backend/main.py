@@ -23,6 +23,7 @@ from .emailer import send_email
 from .deepseek import configured as deepseek_configured, generate_question as deepseek_generate_question
 from .gapgpt import configured as gapgpt_configured, generate_question as gapgpt_generate_question
 from .matching import classify, match_job
+from .persian import PERSIAN_QUESTION_RULE, is_persian_question
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 APP_ORIGIN = os.getenv("APP_ORIGIN", "https://interview.armember.ir").rstrip("/")
@@ -35,7 +36,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Interview AI", version="0.4.1", lifespan=lifespan)
+app = FastAPI(title="Interview AI", version="0.4.2", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 
 
@@ -125,6 +126,30 @@ async def generate_question(instructions: str, previous: list[dict], answer: str
     raise HTTPException(503, "A text interview provider has not been configured")
 
 
+async def generate_persian_question(instructions: str, previous: list[dict],
+                                    answer: str | None, existing_question: str | None = None) -> str:
+    """Reject English outputs; retry at most once with a strict Persian rewrite request."""
+    question = existing_question if existing_question is not None else await generate_question(
+        instructions, previous, answer)
+    if is_persian_question(question):
+        return question
+    # On a failed generation, do not store or display the rejected English draft.
+    repair = (
+        instructions + "\n" + PERSIAN_QUESTION_RULE
+        + "\nThe previous draft below was rejected because it was not in Persian. "
+          "Translate/rephrase THIS SAME technical question into natural Persian. "
+          "Keep only technical product names in English. Do not write an English greeting. "
+          "Do not add another question or change the intent.\n"
+        + "<rejected_draft_untrusted>\n" + str(question)[:1500]
+        + "\n</rejected_draft_untrusted>\n"
+        + "بازنویسی همین سؤال فقط به فارسی:"
+    )
+    fixed = await generate_question(repair, [], None)
+    if not is_persian_question(fixed):
+        raise HTTPException(502, "مصاحبه‌گر سؤال فارسی معتبری تولید نکرد؛ دوباره تلاش کنید.")
+    return fixed
+
+
 def audit(db, user_id, action, resource):
     db.add(models.AuditEvent(user_id=user_id, action=action, resource=resource, created_at=now()))
 
@@ -155,7 +180,7 @@ def candidate_page():
 
 @app.get("/api/v1/health")
 def health():
-    return {"status": "ok", "version": "0.4.1"}
+    return {"status": "ok", "version": "0.4.2"}
 
 
 @app.post("/api/v1/auth/login")
@@ -627,14 +652,14 @@ async def candidate_ai_turn(payload: AITurnIn, db: Session = Depends(get_db)):
     answer = payload.text.strip() if payload.text else None
     if not ai_questions and answer:
         raise HTTPException(409, "Start the AI interview before submitting an answer")
-    if ai_questions and not answer:
-        last_question = ai_questions[-1]
-        return {"question": last_question["text"], "turn_count": len(ai_questions),
-                "already_started": True}
+    existing_question = ai_questions[-1]["text"] if ai_questions and not answer else None
+    if existing_question is not None and is_persian_question(existing_question):
+        return {"question": existing_question, "turn_count": len(ai_questions),
+                "already_started": True, "was_corrected": False}
     max_questions = max(2, min(15, int(os.getenv("AI_QUESTIONS_PER_INTERVIEW", "10"))))
-    if len(ai_questions) >= max_questions:
+    if existing_question is None and len(ai_questions) >= max_questions:
         raise HTTPException(429, "Interview question limit reached; finish and submit your interview")
-    if len(transcript) >= 120:
+    if existing_question is None and len(transcript) >= 120:
         raise HTTPException(429, "Interview transcript limit reached")
     hourly_cap = max(1, min(500, int(os.getenv("AI_QUESTIONS_PER_HOUR", "80"))))
     count = db.scalars(select(models.AuditEvent.id).where(
@@ -646,8 +671,21 @@ async def candidate_ai_turn(payload: AITurnIn, db: Session = Depends(get_db)):
     job = db.get(models.Job, invitation.job_id)
     candidate = db.get(models.Candidate, invitation.candidate_id)
     instructions = build_interview_instructions(job, candidate)
-    question = await generate_question(instructions, transcript, answer)
+    question = await generate_persian_question(
+        instructions, transcript, answer, existing_question=existing_question)
     stamped = now()
+    if existing_question is not None:
+        # Existing interviews with an English first question can be repaired
+        # in place without deleting the applicant's answers or using another turn.
+        for index in range(len(transcript) - 1, -1, -1):
+            if transcript[index].get("source") == "server_llm":
+                transcript[index] = {**transcript[index], "text": question, "saved_at": stamped}
+                break
+        invitation.transcript = transcript
+        audit(db, None, "ai.chat_turn", str(invitation.id))
+        db.commit()
+        return {"question": question, "turn_count": len(ai_questions),
+                "already_started": True, "was_corrected": True}
     if answer:
         transcript.append({"role": "candidate", "source": "candidate_ai",
                            "text": answer, "saved_at": stamped})
