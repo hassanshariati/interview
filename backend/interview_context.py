@@ -6,7 +6,6 @@ Only relevant professional excerpts are sent to the voice model after consent.
 import re
 
 from .cv_parser import clean_text
-from .matching import find_skill_mentions
 
 EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 WEB = re.compile(r"(?i)(?:https?://|www\.)\S+")
@@ -15,6 +14,10 @@ PRIVATE_LINE = re.compile(
     r"(?i)\b(?:date of birth|birthdate|national id|nationality|marital|gender|religion|"
     r"home address|passport|telephone|mobile|contact details|birth year)\b|"
     r"(?:تاریخ تولد|کد ملی|شماره ملی|شماره تماس|موبایل|آدرس منزل|وضعیت تأهل|دین|مذهب|جنسیت)"
+)
+PROMPT_INJECTION = re.compile(
+    r"(?i)ignore (?:all|previous|the) instructions|(?:system|developer|assistant)\s*:"
+    r"|\b(?:hire me|recommend me|override policy|reveal your prompt)\b"
 )
 WORK_TERMS = (
     "experience", "project", "built", "developed", "designed", "deployed",
@@ -30,12 +33,11 @@ def useful_resume_excerpts(text: str, required_skills: list[str]) -> list[str]:
     if not text:
         return []
     raw = clean_text(text)
-    mentions = find_skill_mentions(raw, required_skills[:20])
     lines = []
     seen = set()
     for line in raw.splitlines():
         line = " ".join(line.split())
-        if not line or PRIVATE_LINE.search(line):
+        if not line or PRIVATE_LINE.search(line) or PROMPT_INJECTION.search(line):
             continue
         sanitized = EMAIL.sub("[email removed]", WEB.sub("[url removed]", PHONE.sub("[phone removed]", line))
         if len(sanitized) < 12:
@@ -51,16 +53,6 @@ def useful_resume_excerpts(text: str, required_skills: list[str]) -> list[str]:
             lines.append(clip)
         if len(lines) >= 15:
             break
-    for skill, excerpt in mentions.items():
-        # The excerpt is candidate-provided and can contain PII or instruction
-        # injection. Apply the same redaction rules before quoting it.
-        if PRIVATE_LINE.search(excerpt):
-            continue
-        safe = EMAIL.sub("[email removed]", WEB.sub("[url removed]", PHONE.sub("[phone removed]", clean_text(excerpt)))
-        sentence = skill[:80] + ": " + safe[:200]
-        if sentence.casefold() not in seen and len(lines) < 20:
-            seen.add(sentence.casefold())
-            lines.append(sentence)
     # A CV containing unusual tables may have no recognizable technical lines.
     # In that case do not send personal headings or contact details to the model.
     return lines[:20]
