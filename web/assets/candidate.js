@@ -182,7 +182,7 @@ function releaseHolding(send=true){
   if(recognition){
     try{recognition.stop();}catch{completeHeldAnswer();}
     // Safety net for browsers that never dispatch onend after stop().
-    releaseTimer=setTimeout(completeHeldAnswer,2000);
+    if(releasePending)releaseTimer=setTimeout(completeHeldAnswer,2000);
   }else completeHeldAnswer();
 }
 $("hold-to-talk").addEventListener("pointerdown",event=>{
