@@ -253,6 +253,43 @@ async function showReport() {
       for(const row of session.transcript.slice(0,150)) {
         panel.append(create("p",null,(row.role==="candidate"?"داوطلب: ":"مصاحبه‌گر: ")+row.text));
       }
+      const hasAIAnswers=session.transcript.some(item=>item.source==="candidate_ai");
+      if(session.status==="finished"&&hasAIAnswers){
+        const action=create("button","btn-outline","تحلیل شواهد فنی با AI");
+        action.type="button";
+        const output=create("div","ai-review-output");
+        action.addEventListener("click",async()=>{
+          action.disabled=true;
+          output.replaceChildren(create("p","small","در حال تحلیل پاسخ‌های مصاحبه توسط سرویس AI…"));
+          try{
+            const response=await api("reports/"+candidateId+"/"+jobId+"/ai-analysis",{
+              method:"POST",headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({invitation_id:session.id})
+            });
+            output.replaceChildren();
+            output.append(create("h4",null,"گزارش فنی مبتنی بر شواهد · "+response.provider));
+            output.append(create("p",null,response.summary));
+            const sections=[
+              ["شواهد مهارت و تجربه","evidence_strengths"],
+              ["ابهام‌ها و موارد نیازمند راستی‌آزمایی","evidence_gaps"],
+              ["سؤالات پیشنهادی برای کارشناس انسانی","follow_up_questions"]
+            ];
+            for(const [heading,key] of sections){
+              output.append(create("h4",null,heading));
+              const values=response[key]||[];
+              if(!values.length){output.append(create("p","small","شاهد کافی در پاسخ‌ها ثبت نشده است."));continue;}
+              const list=create("ul");
+              for(const value of values)list.append(create("li",null,value));
+              output.append(list);
+            }
+            output.append(create("p","small",response.limitations));
+          }catch(error){output.replaceChildren(create("p","error-text",error.message));}
+          finally{action.disabled=false;}
+        });
+        panel.append(action,output);
+      }else if(session.status==="finished"){
+        panel.append(create("p","small","برای تحلیل فنی، پاسخ‌های ثبت‌شده از جریان مصاحبه AI لازم است. نوشته‌های ارسالیِ تأییدنشده به‌تنهایی برای این گزارش استفاده نمی‌شوند."));
+      }
       root.append(panel);
     }
   }catch(error){root.replaceChildren(create("p","error-text",error.message));}

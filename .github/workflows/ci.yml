@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [feature/job-portal-admin-dashboard, fix/admin-login-demo-seed-voice, fix/resume-postgres-and-contextual-voice, feature/deepseek-resume-interview, feature/gapgpt-chat-provider, fix/persian-interview-questions]
+    branches: [feature/job-portal-admin-dashboard, fix/admin-login-demo-seed-voice, fix/resume-postgres-and-contextual-voice, feature/deepseek-resume-interview, feature/gapgpt-chat-provider, fix/persian-interview-questions, feature/push-to-talk-and-interview-review]
 
 permissions:
   contents: read
@@ -28,4 +28,4 @@ jobs:
           node --check web/assets/portal.js
           node --check web/assets/admin.js
           node --check web/assets/candidate.js
-          node --test tests/admin-login.test.cjs
+          node --test tests/admin-login.test.cjs tests/candidate-ptt.test.cjs
