@@ -24,6 +24,7 @@ from .deepseek import configured as deepseek_configured, generate_question as de
 from .gapgpt import configured as gapgpt_configured, generate_question as gapgpt_generate_question
 from .matching import classify, match_job
 from .persian import PERSIAN_QUESTION_RULE, is_persian_question
+from .interview_review import generate_interview_review, review_evidence
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 APP_ORIGIN = os.getenv("APP_ORIGIN", "https://interview.armember.ir").rstrip("/")
@@ -36,7 +37,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Interview AI", version="0.4.2", lifespan=lifespan)
+app = FastAPI(title="Interview AI", version="0.5.0", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 
 
@@ -106,6 +107,10 @@ class TranscriptIn(TokenIn):
 
 class AITurnIn(TokenIn):
     text: str | None = Field(default=None, min_length=1, max_length=2000)
+
+
+class AIReviewIn(BaseModel):
+    invitation_id: int = Field(gt=0)
 
 
 def chat_provider() -> str:
@@ -180,7 +185,7 @@ def candidate_page():
 
 @app.get("/api/v1/health")
 def health():
-    return {"status": "ok", "version": "0.4.2"}
+    return {"status": "ok", "version": "0.5.0"}
 
 
 @app.post("/api/v1/auth/login")
@@ -483,6 +488,39 @@ def report(candidate_id: int, job_id: int, db: Session = Depends(get_db), user=D
         "decision": "Human review required", "automated_rejection": False,
         "note": "Client-submitted transcripts are not independently verified; no automatic hiring assessment is performed."
     }
+
+
+@app.post("/api/v1/reports/{candidate_id}/{job_id}/ai-analysis")
+async def ai_analysis(candidate_id: int, job_id: int, payload: AIReviewIn,
+                      db: Session = Depends(get_db), user=Depends(require_admin)):
+    """On-demand evidence review: admin only, after consent and finish."""
+    invitation = db.get(models.Invitation, payload.invitation_id)
+    if (not invitation or invitation.candidate_id != candidate_id
+            or invitation.job_id != job_id):
+        raise HTTPException(404, "Interview not found for this candidate and job")
+    if invitation.status != "finished" or not invitation.consent_at:
+        raise HTTPException(409, "Only a consented, completed interview can be analyzed")
+    candidate = db.get(models.Candidate, candidate_id)
+    job = db.get(models.Job, job_id)
+    if not candidate or not job:
+        raise HTTPException(404, "Candidate or job not found")
+    # Review is charged by the model provider. Limit on-demand calls per reviewer.
+    max_reviews = max(1, min(30, int(os.getenv("AI_REPORTS_PER_USER_HOUR", "6"))))
+    recent = db.scalars(select(models.AuditEvent.id).where(
+        models.AuditEvent.user_id == user.id,
+        models.AuditEvent.action == "ai.report",
+        models.AuditEvent.created_at >= now() - 3600).limit(max_reviews)).all()
+    if len(recent) >= max_reviews:
+        raise HTTPException(429, "Hourly AI report limit reached")
+    _, answers = review_evidence(invitation.transcript or [])
+    if answers < 1:
+        raise HTTPException(422, "در این مصاحبه پاسخ معتبری برای تحلیل فنی ثبت نشده است.")
+    result = await generate_interview_review(
+        chat_provider(), job.title, job.required_skills or [], invitation.transcript or [])
+    audit(db, user.id, "ai.report", str(invitation.id))
+    db.commit()
+    return {"invitation_id": invitation.id, "job_title": job.title,
+            "candidate_name": candidate.full_name, **result}
 
 
 @app.post("/api/v1/invitations")
