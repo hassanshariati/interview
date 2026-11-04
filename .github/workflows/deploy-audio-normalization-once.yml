@@ -1,0 +1,20 @@
+name: One-time canonical MP3 production release
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/deploy-audio-normalization-once.yml"]
+permissions:
+  actions: write
+  contents: read
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger tested production deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: hassanshariati/interview
+        run: |
+          set -euo pipefail
+          gh workflow run deploy.yml --ref main --repo "$GH_REPO"
