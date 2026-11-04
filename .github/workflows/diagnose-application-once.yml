@@ -1,0 +1,62 @@
+name: One-shot application error diagnosis
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/diagnose-application-once.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux, X64]
+    environment: production
+    timeout-minutes: 6
+    steps:
+      - name: Exercise sample application inside rollback-only database transaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /opt/interview-ai
+          docker compose exec -T api python - <<'PY'
+          import traceback
+          from sqlalchemy import select, text
+          from sqlalchemy.orm import Session
+          from fastapi.testclient import TestClient
+          from backend import models
+          from backend.db import engine, get_db
+          from backend.main import app
+
+          with engine.connect() as conn:
+              outer = conn.begin()
+              session = Session(bind=conn, join_transaction_mode="create_savepoint")
+              def isolated_db():
+                  yield session
+              app.dependency_overrides[get_db] = isolated_db
+              try:
+                  job = session.scalar(select(models.Job).order_by(models.Job.id))
+                  assert job is not None, "No job to test"
+                  with TestClient(app, raise_server_exceptions=True) as client:
+                      for file_part in (False, True):
+                          parts = {"file": ("sample.txt", b"Python, Kubernetes and PostgreSQL", "text/plain")} if file_part else None
+                          try:
+                              response = client.post("/api/v1/public/applications", data={
+                                  "job_id": str(job.id),
+                                  "full_name": "Synthetic Test",
+                                  "email": "synthetic.rollback@example.com",
+                              }, files=parts)
+                              print("APPLICATION_FILE=" + str(file_part) + " STATUS=" + str(response.status_code))
+                              if response.status_code >= 400:
+                                  print("ERROR_DETAIL=" + str(response.json().get("detail", ""))[:300])
+                          except Exception:
+                              print("APPLICATION_FILE=" + str(file_part) + " raised exception")
+                              print("\n".join(traceback.format_exc().splitlines()[-28:]))
+                  cols = conn.execute(text("SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('candidates','invitations','audit_events') ORDER BY table_name, ordinal_position")).all()
+                  print("SCHEMA_COLUMN_TYPES=" + str(cols))
+              finally:
+                  app.dependency_overrides.pop(get_db, None)
+                  session.close()
+                  outer.rollback()
+          PY
