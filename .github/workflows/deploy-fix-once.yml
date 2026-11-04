@@ -1,0 +1,25 @@
+name: Trigger reviewed production deploy once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/deploy-fix-once.yml"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  start:
+    name: Dispatch production workflow on main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Start existing tested release workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: hassanshariati/interview
+        run: |
+          set -euo pipefail
+          gh workflow run deploy.yml --ref main --repo "$GH_REPO"

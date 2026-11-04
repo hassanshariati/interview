@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [feature/job-portal-admin-dashboard]
+    branches: [feature/job-portal-admin-dashboard, fix/admin-login-demo-seed-voice]
 
 permissions:
   contents: read
@@ -28,3 +28,4 @@ jobs:
           node --check web/assets/portal.js
           node --check web/assets/admin.js
           node --check web/assets/candidate.js
+          node --test tests/admin-login.test.cjs

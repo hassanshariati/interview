@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Interview AI", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Interview AI", version="0.3.1", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 
 
@@ -130,7 +130,7 @@ def candidate_page():
 
 @app.get("/api/v1/health")
 def health():
-    return {"status": "ok", "version": "0.3.0"}
+    return {"status": "ok", "version": "0.3.1"}
 
 
 @app.post("/api/v1/auth/login")
@@ -227,9 +227,17 @@ def job_category(job):
     return "سایر حوزه‌ها"
 
 
+DEMO_SOURCE_FILENAME = "__interview_demo_seed_v1__"
+
+
+def is_demo_candidate(candidate):
+    return candidate.source_filename == DEMO_SOURCE_FILENAME
+
+
 def job_payload(job):
     return {"id": job.id, "title": job.title, "description": job.description or "",
-            "required_skills": job.required_skills or [], "category": job_category(job)}
+            "required_skills": job.required_skills or [], "category": job_category(job),
+            "is_demo": job.title.startswith("[نمونه]")}
 
 
 @app.get("/api/v1/public/jobs")
@@ -324,7 +332,8 @@ async def upload_cv(full_name: str = Form(min_length=2, max_length=180), email: 
 @app.get("/api/v1/candidates")
 def list_candidates(db: Session = Depends(get_db), user=Depends(require_admin)):
     items = db.scalars(select(models.Candidate).order_by(models.Candidate.id.desc())).all()
-    return [{"id": c.id, "full_name": c.full_name, "email": c.email, "job_families": c.job_families} for c in items]
+    return [{"id": c.id, "full_name": c.full_name, "email": c.email, "job_families": c.job_families,
+             "is_demo": is_demo_candidate(c)} for c in items]
 
 
 @app.get("/api/v1/matches/{candidate_id}/{job_id}")
@@ -349,7 +358,7 @@ def add_review(payload: AssessmentIn, db: Session = Depends(get_db), user=Depend
 
 @app.get("/api/v1/admin/analytics")
 def analytics(db: Session = Depends(get_db), user=Depends(require_admin)):
-    """Management charts contain only actual submissions and human rubric ratings."""
+    """Clearly separate artificial demo scores from actual human ratings."""
     jobs = db.scalars(select(models.Job).order_by(models.Job.id.desc())).all()
     candidates = db.scalars(select(models.Candidate).order_by(models.Candidate.id.desc())).all()
     meetings = db.scalars(select(models.Invitation).order_by(models.Invitation.id.desc())).all()
@@ -357,11 +366,17 @@ def analytics(db: Session = Depends(get_db), user=Depends(require_admin)):
     by_job = Counter(m.job_id for m in meetings)
     statuses = Counter(m.status for m in meetings)
     activity = Counter(datetime.fromtimestamp(m.created_at, tz=timezone.utc).date().isoformat() for m in meetings)
-    scored = defaultdict(list)
-    ratings_by_pair = Counter()
+    demo_ids = {c.id for c in candidates if is_demo_candidate(c)}
+    demo_invitation_ids = {m.id for m in meetings if m.candidate_id in demo_ids}
+    scored, demo_scored = defaultdict(list), defaultdict(list)
+    ratings_by_pair, demo_ratings_by_pair = Counter(), Counter()
     for a in assessments:
-        scored[a.competency].append(a.score)
-        ratings_by_pair[(a.candidate_id, a.job_id)] += 1
+        if a.candidate_id in demo_ids:
+            demo_scored[a.competency].append(a.score)
+            demo_ratings_by_pair[(a.candidate_id, a.job_id)] += 1
+        else:
+            scored[a.competency].append(a.score)
+            ratings_by_pair[(a.candidate_id, a.job_id)] += 1
     names = {c.id: c.full_name for c in candidates}
     titles = {j.id: j.title for j in jobs}
     today = datetime.now(timezone.utc).date()
@@ -369,16 +384,22 @@ def analytics(db: Session = Depends(get_db), user=Depends(require_admin)):
     return {
         "counts": {"jobs": len(jobs), "candidates": len(candidates),
                    "interviews": len(meetings), "finished": statuses["finished"],
-                   "assessments": len(assessments)},
+                   "assessments": len(assessments) - sum(map(len, demo_scored.values())),
+                   "demo_candidates": len(demo_ids), "demo_interviews": len(demo_invitation_ids),
+                   "demo_assessments": sum(map(len, demo_scored.values()))},
         "statuses": [{"name": key, "value": statuses[key]} for key in ("pending", "confirmed", "finished")],
         "by_job": [{"job_id": j.id, "name": j.title, "count": by_job[j.id]} for j in jobs],
         "activity": [{"day": day, "count": activity[day]} for day in trend],
         "competencies": [{"name": key, "average": round(sum(values) / len(values), 2),
                            "count": len(values)} for key, values in sorted(scored.items())],
+        "demo_competencies": [{"name": key, "average": round(sum(values) / len(values), 2),
+                               "count": len(values)} for key, values in sorted(demo_scored.items())],
         "recent": [{"id": m.id, "candidate_id": m.candidate_id, "job_id": m.job_id,
                     "candidate": names.get(m.candidate_id, "—"), "job": titles.get(m.job_id, "—"),
                     "status": m.status, "created_at": m.created_at,
-                    "human_ratings": ratings_by_pair[(m.candidate_id, m.job_id)]}
+                    "is_demo": m.candidate_id in demo_ids,
+                     "human_ratings": ratings_by_pair[(m.candidate_id, m.job_id)],
+                     "demo_ratings": demo_ratings_by_pair[(m.candidate_id, m.job_id)]}
                    for m in meetings[:50]],
         "rating_note": "Scores (0-4) are entered by human reviewers. Missing evaluations are unscored."
     }
@@ -394,7 +415,8 @@ def report(candidate_id: int, job_id: int, db: Session = Depends(get_db), user=D
     meetings = db.scalars(select(models.Invitation).where(models.Invitation.candidate_id == candidate_id,
                             models.Invitation.job_id == job_id).order_by(models.Invitation.id.desc())).all()
     return {
-        "candidate": c.full_name, "job": j.title, "cv_evidence": match_job(c.cv_text, j.required_skills),
+        "candidate": c.full_name, "job": j.title, "is_demo": is_demo_candidate(c),
+         "cv_evidence": match_job(c.cv_text, j.required_skills),
         "human_assessments": [{"competency": a.competency, "score": a.score, "observed_answer": a.observed_answer,
                                 "reviewer_notes": a.reviewer_notes} for a in reviews],
         "interviews": [{"id": m.id, "status": m.status, "slot": m.selected_slot,
@@ -448,7 +470,8 @@ def public_lookup(payload: TokenIn, db: Session = Depends(get_db)):
     inv = get_invitation(db, payload.token)
     c, job = db.get(models.Candidate, inv.candidate_id), db.get(models.Job, inv.job_id)
     return {"job": job.title, "candidate": c.full_name, "slots": inv.slots, "selected_slot": inv.selected_slot,
-            "status": inv.status, "consent": bool(inv.consent_at), "voice_enabled": os.getenv("ENABLE_REALTIME", "false") == "true"}
+            "status": inv.status, "consent": bool(inv.consent_at), "voice_enabled": bool(os.getenv("OPENAI_API_KEY", "").strip()) and
+                             os.getenv("ENABLE_REALTIME", "false").lower() == "true"}
 
 
 @app.post("/api/v1/public/invitation/confirm")

@@ -62,4 +62,9 @@ jobs:
           git checkout main
           git merge --ff-only "$DEPLOY_SHA"
           bash scripts/deploy.sh
+          # Explicit one-time showcase seeding is idempotent: no real records are overwritten.
+          docker compose exec -T api python -m backend.seed_demo
+          docker compose exec -T api python -c 'import os; key=bool(os.getenv("OPENAI_API_KEY","").strip()); on=os.getenv("ENABLE_REALTIME","false").lower()=="true"; print("VOICE_KEY_PRESENT="+str(key)); print("VOICE_FLAG_ENABLED="+str(on)); print("VOICE_READY="+str(key and on))'
           curl --fail --silent --show-error http://127.0.0.1:18080/api/v1/health
+          printf '\n'
+          curl --fail --silent --show-error http://127.0.0.1:18080/api/v1/public/jobs | python3 -c 'import json,sys; rows=json.load(sys.stdin); n=sum(bool(j.get("is_demo")) for j in rows); print("DEMO_JOBS_VISIBLE="+str(n)); assert n >= 10'
