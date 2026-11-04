@@ -180,3 +180,50 @@ Evaluate job-related knowledge from questions and answers; **do not** derive hir
 ## GitHub repository
 
 Committed source: <https://github.com/hassanshariati/interview>. If GitHub app write access is unavailable, install this ZIP and push the source via authenticated Git on your trusted workstation (not by exposing passwords in chat). Check the connected GitHub app's **Contents: Read and write** permission.
+
+
+## DeepSeek CV-grounded interview (v0.4.0)
+
+The server-side DeepSeek integration uses the official Chat Completions endpoint.
+In the server-only `.env` file, set:
+
+```dotenv
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=your-actual-key
+DEEPSEEK_MODEL=deepseek-flash
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+AI_QUESTIONS_PER_INTERVIEW=10
+AI_QUESTIONS_PER_HOUR=80
+```
+
+Restart the API container so it receives updated environment variables:
+
+```bash
+docker compose up -d --force-recreate api
+```
+
+Select a job on the public portal, optionally submit a CV, confirm consent, and
+press **Start interview with DeepSeek**. DeepSeek receives only bounded,
+heuristically redacted professional CV excerpts and technical competencies,
+not the entire CV. It creates the first practical question and follow-up questions
+after each answer; the AI conversation is saved with server-side provenance and
+is available to the authorized human reviewer.
+
+**Browser voice:** Web Speech Recognition and SpeechSynthesis provide optional
+speech recognition and spoken questions. Availability and Persian quality vary by
+browser, OS, and installed voices. The browser's speech recognition provider MAY
+process raw audio externally; it is not necessarily local speech-to-text.
+DeepSeek itself receives text, not raw audio. The textarea fallback works even
+without browser speech APIs. Use HTTPS, and allow the microphone permission.
+The OpenAI Realtime path remains available separately when chosen and configured.
+
+**Controls:** A private interview token, explicit consent, scheduled/TTL window,
+per-interview question count and global hourly call limit apply. The API key is
+never sent to the browser. Public applicant identity is NOT email-verified.
+Avoid real private resumes while evaluating third-party provider privacy.
+No automated hiring decision or inferred emotion/stress rating is performed.
+
+If the page reports **DeepSeek not configured**, verify the API container has
+received the server-only environment variables (print only booleans; do NOT
+print the key). If a provider call returns an error, verify DeepSeek account
+credit, key validity, DNS egress and the account's permitted API models.
