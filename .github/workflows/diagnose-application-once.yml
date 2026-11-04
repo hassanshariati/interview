@@ -83,6 +83,8 @@ jobs:
                   m=re.search(r"(?:^|\s)([\w.]+(?:Error|Exception)):",entry)
                   if m: exceptions[m.group(1)]+=1
                   if "Exception in ASGI application" in entry:break
+          driver_errors=collections.Counter(re.findall(r"psycopg\\.errors\\.([A-Za-z0-9_]+)",raw))
+          print("POSTGRES_DRIVER_ERRORS="+str(driver_errors))
           print("EXCEPTION_CLASSES="+str(exceptions))
           print("BACKEND_TRACE_LOCATIONS="+str(frames))
           print("LOG_CAPTURE_EXIT_CODE="+str(result.returncode))
