@@ -277,7 +277,9 @@ async function startFullRecording(){
     });
     if(!holding){
       live.getTracks().forEach(track=>track.stop());
-      releasePending=false;info("برای ضبط، دکمه را تا بعد از فعال‌شدن میکروفون نگه دار.");
+      releasePending=false;
+      $("send-text").disabled=false;$("finish").disabled=false;
+      info("برای ضبط، دکمه را تا بعد از فعال‌شدن میکروفون نگه دار.");
       return;
     }
     recordingStream=live;
