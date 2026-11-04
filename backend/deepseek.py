@@ -45,7 +45,7 @@ async def generate_question(instructions: str, prior_turns: list[dict],
         messages.append({"role": "assistant" if turn["source"] == "server_llm" else "user",
                          "content": str(turn.get("text", ""))[:1800]})
     if latest_answer is not None:
-        messages.append({"role": "user", "content": latest_answer[:2000]})
+        messages.append({"role": "user", "content": latest_answer[:6500]})
     else:
         messages.append({"role": "user", "content": "با سلام مصاحبه را شروع کن و یک سؤال فنی کاربردی درباره رزومه و شغل به فارسی بپرس."})
     payload = {"model": model, "messages": messages, "max_tokens": 330,

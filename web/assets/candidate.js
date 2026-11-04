@@ -4,6 +4,9 @@ const $=id=>document.getElementById(id);
 let rtc=null,stream=null,recognition=null,known=new Set(),savedSomething=false;
 let holding=false,releasePending=false,releaseTimer=null,voiceSegments=[],draftBeforeVoice="";
 let voiceFinalizeCalled=false;
+let audioTranscriptionAvailable=false,persianAudioAvailable=false;
+let holdMode="",mediaRecorder=null,recordingStream=null,mediaChunks=[],maxRecordingTimer=null;
+let questionAudioURL=null,recordedAudioURL=null,playbackVersion=0,transcribing=false;
 let aiProvider="openai",aiStarted=false,aiHistory=[],aiBusy=false,hasTranscript=false;
 const isChatProvider=()=>["deepseek","gapgpt"].includes(aiProvider);
 const aiName=()=>aiProvider==="gapgpt"?"GapGPT":"DeepSeek";
@@ -44,16 +47,60 @@ function showHistory(items) {
   $("start").textContent=needsPersianRepair()?"بازنویسی سؤال به فارسی":(aiStarted?"🔊 پخش دوباره سؤال":"شروع مصاحبه فارسی با "+aiName());
   $("hold-to-talk").disabled=!aiStarted||needsPersianRepair()||aiBusy;
 }
-function speaking(text) {
-  if(!canSpeak){info("متن سؤال نمایش داده شد؛ این مرورگر تبدیل متن به صدا ندارد.");return;}
+function stopQuestionAudio(){
+  playbackVersion++;
+  const audio=$("question-audio");
+  if(typeof audio.pause==="function")audio.pause();
+  if(questionAudioURL&&typeof URL!=="undefined")URL.revokeObjectURL(questionAudioURL);
+  questionAudioURL=null;
+  audio.hidden=true;
+  if(canSpeak)try{speechSynthesis.cancel();}catch{}
+}
+function localPersianSpeech(text){
+  if(!canSpeak)return false;
   try{
-    speechSynthesis.cancel();
+    const voice=(speechSynthesis.getVoices?.()||[]).find(v=>/^fa[-_]/i.test(v.lang));
+    if(!voice)return false;
     const utterance=new SpeechSynthesisUtterance(text);
-    utterance.lang=$("speech-lang").value;
-    utterance.rate=0.93;
-    utterance.onerror=()=>info("پخش صدا در مرورگر ممکن نیست؛ سؤال را از متن بخوان.");
-    speechSynthesis.speak(utterance);
-  }catch{info("پخش صدا پشتیبانی نمی‌شود؛ می‌توانی سؤال را بخوانی.");}
+    utterance.voice=voice;utterance.lang="fa-IR";utterance.rate=0.93;
+    speechSynthesis.cancel();speechSynthesis.speak(utterance);
+    return true;
+  }catch{return false;}
+}
+async function speaking(text){
+  if(!isChatProvider())return;
+  stopQuestionAudio();
+  const version=playbackVersion;
+  if(!persianAudioAvailable){
+    if(!localPersianSpeech(text))info("این مرورگر صدای فارسی ندارد. متن سؤال را بخوان یا صدای فارسی سرور را فعال کن.");
+    return;
+  }
+  try{
+    info("در حال آماده‌سازی صدای فارسی سؤال…");
+    const response=await fetch("/api/v1/public/invitation/persian-speech",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      credentials:"same-origin",body:JSON.stringify({token})
+    });
+    if(!response.ok){
+      const data=await response.json().catch(()=>({}));
+      throw Error(data.detail||"سرویس صدای فارسی در دسترس نیست");
+    }
+    const blob=await response.blob();
+    if(version!==playbackVersion)return; // Candidate started speaking or a new question arrived.
+    questionAudioURL=URL.createObjectURL(blob);
+    const audio=$("question-audio");
+    audio.src=questionAudioURL;audio.hidden=false;
+    try{
+      await audio.play();
+      info("سؤال به فارسی پخش می‌شود. پس از شنیدن، دکمه میکروفون را نگه دار.");
+    }catch{
+      info("برای شنیدن سؤال فارسی، دکمه پخشِ فایل صوتی را بزن.");
+    }
+  }catch{
+    if(version!==playbackVersion)return;
+    if(localPersianSpeech(text))info("سؤال با صدای فارسیِ نصب‌شده در مرورگر پخش می‌شود.");
+    else info("سرویس صدای فارسی موقتاً در دسترس نیست و مرورگر هم صدای فارسی ندارد. سؤال را از متن بخوان.");
+  }
 }
 async function askAI(text=null) {
   if(aiBusy)return;
@@ -74,116 +121,214 @@ async function askAI(text=null) {
     showHistory(aiHistory);
     $("manual").value="";
     info("سؤال "+Number(result.turn_count).toLocaleString("fa-IR")+" آماده است. جواب را بگو یا بنویس.");
-    speaking(result.question);
+    void speaking(result.question);
   }catch(err){info(err.message||"اتصال به سرویس هوش مصنوعی برقرار نشد.");}
   finally{
     aiBusy=false;$("start").disabled=false;$("send-text").disabled=false;
-    $("hold-to-talk").disabled=!aiStarted||needsPersianRepair();
+    $("hold-to-talk").disabled=!aiStarted||needsPersianRepair()||transcribing;
   }
 }
 function setHoldState(active){
   const btn=$("hold-to-talk");
   btn.setAttribute("aria-pressed",String(active));
   btn.classList.toggle("recording",active);
-  btn.textContent=active?"🔴 در حال ضبط؛ برای ارسال رها کن":"🎙 برای پاسخ‌دادن نگه دار";
+  btn.textContent=active?"🔴 در حال ضبط کامل پاسخ؛ برای پایان رها کن":"🎙 برای پاسخ‌دادن نگه دار";
 }
 function voiceText(parts){
   return parts.map(s=>String(s).trim()).filter(Boolean).join(" ").trim();
 }
-function completeHeldAnswer(){
+function finishBrowserTranscription(){
   if(!releasePending||voiceFinalizeCalled)return;
   voiceFinalizeCalled=true;releasePending=false;
   clearTimeout(releaseTimer);releaseTimer=null;
-  const recognized=voiceText(voiceSegments);
-  const answer=[draftBeforeVoice.trim(),recognized].filter(Boolean).join(" ").trim();
-  if(!recognized){
-    info("گفتار قابل‌اعتمادی ثبت نشد؛ پاسخ را در کادر بنویس و دکمه ارسال را بزن.");
-    return;
-  }
-  $("manual").value=answer;
-  if(answer.length>2000){
-    info("پاسخ طولانی است. متن شناسایی‌شده را کوتاه کن و با دکمه ارسال بفرست.");
-    return;
-  }
-  info("صحبت تمام شد؛ پاسخ در حال ارسال به مصاحبه‌گر است…");
-  askAI(answer);
+  const text=voiceText(voiceSegments);
+  const draft=[draftBeforeVoice.trim(),text].filter(Boolean).join(" ").trim();
+  if(draft)$("manual").value=draft.slice(0,6500);
+  // Browser recognition frequently returns only a few early words.
+  // Never silently send its potentially incomplete text to the LLM.
+  info(text?"متن موقت مرورگر ثبت شد. آن را بررسی، با پاسخ کامل مقایسه و ویرایش و سپس «ارسال پاسخ» را بزن.":
+      "مرورگر گفتار قابل‌اعتمادی تشخیص نداد. پاسخ را تایپ کن.");
+  $("hold-to-talk").disabled=false;
 }
 function startRecognitionSegment(){
   if(!holding||!Recognition)return;
   let current;
   try{
-    current=new Recognition();
-    recognition=current;
-    current.lang="fa-IR";
-    current.continuous=true;
-    current.interimResults=true;
-    current.maxAlternatives=1;
+    current=new Recognition();recognition=current;
+    current.lang="fa-IR";current.continuous=true;current.interimResults=true;current.maxAlternatives=1;
     const finalized=new Map(),previews=new Map();
-    current.onresult=event=>{
-      for(let i=event.resultIndex;i<event.results.length;i++){
-        const result=event.results[i];
-        const text=String(result[0]?.transcript||"").trim();
-        if(result.isFinal){finalized.set(i,text);previews.delete(i);}
+    current.onresult=e=>{
+      for(let i=e.resultIndex;i<e.results.length;i++){
+        const item=e.results[i];
+        const text=String(item[0]?.transcript||"").trim();
+        if(item.isFinal){finalized.set(i,text);previews.delete(i);}
         else previews.set(i,text);
       }
-      const finalText=voiceText([...finalized.entries()].sort((a,b)=>a[0]-b[0]).map(x=>x[1]));
-      const partialText=voiceText([...previews.entries()].sort((a,b)=>a[0]-b[0]).map(x=>x[1]));
-      $("manual").value=[draftBeforeVoice,voiceText(voiceSegments),finalText,partialText].filter(Boolean).join(" ").trim();
+      const confirmed=voiceText([...finalized.entries()].sort((a,b)=>a[0]-b[0]).map(x=>x[1]));
+      const partial=voiceText([...previews.entries()].sort((a,b)=>a[0]-b[0]).map(x=>x[1]));
+      $("manual").value=[draftBeforeVoice,voiceText(voiceSegments),confirmed,partial].filter(Boolean).join(" ").trim().slice(0,6500);
     };
-    current.onerror=event=>{
-      if(["not-allowed","service-not-allowed","audio-capture","network"].includes(event.error)){
+    current.onerror=e=>{
+      if(["not-allowed","service-not-allowed","audio-capture","network"].includes(e.error)){
         holding=false;releasePending=false;setHoldState(false);
-        info("تشخیص گفتار متوقف شد: "+event.error+"؛ پاسخ را تایپ کن.");
+        info("تشخیص گفتار مرورگر قطع شد. پاسخ را به‌صورت متنی بنویس.");
       }
     };
     current.onend=()=>{
       if(recognition!==current)return;
       recognition=null;
-      const complete=voiceText([...finalized.entries()].sort((a,b)=>a[0]-b[0]).map(x=>x[1]));
-      if(complete)voiceSegments.push(complete);
-      if(releasePending){
-        // Final speech-recognition results arrive at or before this event.
-        completeHeldAnswer();
-      }else if(holding){
-        // Browsers may end recognition after a pause. Keep listening while held.
-        setTimeout(()=>{if(holding)startRecognitionSegment();},180);
-      }
+      const confirmed=voiceText([...finalized.entries()].sort((a,b)=>a[0]-b[0]).map(x=>x[1]));
+      const tentative=voiceText([...previews.entries()].sort((a,b)=>a[0]-b[0]).map(x=>x[1]));
+      if(confirmed)voiceSegments.push(confirmed);
+      else if(tentative)voiceSegments.push(tentative);
+      if(releasePending&&holdMode==="media"){
+        // MediaRecorder owns the final submission; browser ASR is just a backup.
+      }else if(releasePending)finishBrowserTranscription();
+      else if(holding)setTimeout(()=>{if(holding)startRecognitionSegment();},150);
     };
     current.start();
   }catch{
     recognition=null;holding=false;releasePending=false;setHoldState(false);
-    info("میکروفون یا تشخیص فارسی در این مرورگر آماده نیست؛ پاسخ را تایپ کن.");
+    info("تشخیص گفتار مرورگر در دسترس نیست. پاسخ را تایپ کن.");
+  }
+}
+function clearRecordingMedia(){
+  clearTimeout(maxRecordingTimer);maxRecordingTimer=null;
+  if(recordingStream){recordingStream.getTracks().forEach(track=>track.stop());recordingStream=null;}
+  mediaRecorder=null;
+}
+async function sendFullRecording(blob){
+  if(!releasePending)return;
+  releasePending=false;
+  if(blob.size<1024){info("ضبط صدا خالی است؛ دوباره امتحان کن یا پاسخ را بنویس.");return;}
+  if(blob.size>8*1024*1024){info("حجم فایل صوتی بزرگ است. پاسخ را کوتاه‌تر ضبط کن یا بنویس.");return;}
+  if(recordedAudioURL&&typeof URL!=="undefined")URL.revokeObjectURL(recordedAudioURL);
+  recordedAudioURL=URL.createObjectURL(blob);
+  const player=$("recorded-audio");
+  player.src=recordedAudioURL;player.hidden=false;
+  transcribing=true;
+  $("hold-to-talk").disabled=true;$("send-text").disabled=true;$("finish").disabled=true;
+  info("در حال تبدیل تمام صدای ضبط‌شده به متن فارسی…");
+  try{
+    const form=new FormData();
+    form.append("token",token);
+    const suffix=blob.type.includes("mp4")?"mp4":blob.type.includes("ogg")?"ogg":"webm";
+    form.append("file",blob,"answer."+suffix);
+    const response=await fetch("/api/v1/public/invitation/transcribe-audio",{
+      method:"POST",credentials:"same-origin",body:form
+    });
+    const data=await response.json().catch(()=>({detail:"پاسخ سرویس صوتی معتبر نیست."}));
+    if(!response.ok)throw Error(typeof data.detail==="string"?data.detail:"تبدیل صدا ناموفق بود.");
+    const transcript=String(data.text||"").trim();
+    const answer=[draftBeforeVoice.trim(),transcript].filter(Boolean).join(" ").trim();
+    if(!transcript)throw Error("فایل ضبط شده متن قابل‌استفاده‌ای نداشت.");
+    $("manual").value=answer.slice(0,6500);
+    if(answer.length>6500){
+      info("متن پاسخ بیش از حد طولانی است. آن را در کادر کوتاه کن و سپس ارسال کن.");
+      return;
+    }
+    info("صدای کامل پردازش شد؛ پاسخ به مصاحبه‌گر ارسال می‌شود…");
+    transcribing=false;
+    await askAI(answer);
+  }catch(error){
+    const tentative=voiceText(voiceSegments);
+    if(tentative){
+      $("manual").value=[draftBeforeVoice,tentative].filter(Boolean).join(" ").trim().slice(0,6500);
+      info("تبدیل فایل کامل ناموفق بود: "+error.message+"؛ متن موقت مرورگر را بررسی و تکمیل کن و سپس ارسال کن. فایل ضبط‌شده هم قابل پخش است.");
+    }else{
+      info("تبدیل صدا ناموفق بود: "+error.message+"؛ صدای ضبط‌شده قابل پخش است. پاسخ را دستی بنویس و ارسال کن.");
+    }
+  }finally{
+    transcribing=false;$("send-text").disabled=false;$("finish").disabled=false;
+    $("hold-to-talk").disabled=!aiStarted||needsPersianRepair()||aiBusy;
+  }
+}
+async function startFullRecording(){
+  const Recorder=window.MediaRecorder;
+  let live;
+  try{
+    live=await navigator.mediaDevices.getUserMedia({
+      audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}
+    });
+    if(!holding){
+      live.getTracks().forEach(track=>track.stop());
+      releasePending=false;info("برای ضبط، دکمه را تا بعد از فعال‌شدن میکروفون نگه دار.");
+      return;
+    }
+    recordingStream=live;
+    const types=["audio/webm;codecs=opus","audio/webm","audio/mp4","audio/ogg;codecs=opus"];
+    const mime=types.find(type=>Recorder.isTypeSupported?.(type))||"";
+    mediaRecorder=mime?new Recorder(live,{mimeType:mime}):new Recorder(live);
+    mediaChunks=[];
+    const current=mediaRecorder;
+    current.ondataavailable=e=>{if(e.data&&e.data.size>0)mediaChunks.push(e.data);};
+    current.onerror=()=>info("خطای ضبط صوت. برای پاسخ می‌توانی از متن استفاده کنی.");
+    current.onstop=()=>{
+      const blob=new Blob(mediaChunks,{type:current.mimeType||mime||"audio/webm"});
+      clearRecordingMedia();
+      if(releasePending)void sendFullRecording(blob);
+    };
+    current.start(1000);
+    if(Recognition)startRecognitionSegment(); // best-effort live preview/backup only
+    info("تمام صدای پاسخ در حال ضبط است. تا پایان صحبت دکمه را نگه دار (حداکثر ۳ دقیقه).");
+    maxRecordingTimer=setTimeout(()=>{
+      if(holding){info("حداکثر سه دقیقه ضبط تکمیل شد. در حال ارسال صدای کامل…");releaseHolding(true);}
+    },180000);
+  }catch{
+    if(live)live.getTracks().forEach(track=>track.stop());
+    clearRecordingMedia();holding=false;releasePending=false;setHoldState(false);
+    info("مجوز میکروفون یا ضبط صدا فعال نشد. با مرورگر به‌روز Chrome یا Edge امتحان کن یا پاسخ را تایپ کن.");
   }
 }
 function beginHolding(event){
-  if(!isChatProvider()||holding||releasePending||aiBusy||!aiStarted||needsPersianRepair())return;
-  if(!$("consent").checked){status("ابتدا رضایت پردازش پاسخ را ثبت کن.");return;}
-  if(!Recognition){info("این مرورگر گفتار فارسی را تشخیص نمی‌دهد؛ از کادر متن استفاده کن.");return;}
-  if(canSpeak)speechSynthesis.cancel();
+  if(!isChatProvider()||holding||releasePending||transcribing||aiBusy||!aiStarted||needsPersianRepair())return;
+  if(!$("consent").checked){status("ابتدا رضایت پردازش صدا را ثبت کن.");return;}
+  const canRecord=audioTranscriptionAvailable&&Boolean(
+    window.MediaRecorder&&typeof navigator!=="undefined"&&navigator.mediaDevices?.getUserMedia);
+  if(!canRecord&&!Recognition){
+    info("این مرورگر ضبط و تشخیص گفتار ندارد. پاسخ را تایپ کن.");return;
+  }
+  stopQuestionAudio();
   holding=true;releasePending=false;voiceFinalizeCalled=false;voiceSegments=[];
   draftBeforeVoice=$("manual").value.trim();
   setHoldState(true);
   if(event?.pointerId!==undefined){
-    try{$("hold-to-talk").setPointerCapture(event.pointerId);}catch{/* unsupported */}
+    try{$("hold-to-talk").setPointerCapture(event.pointerId);}catch{}
   }
-  info("میکروفون فعال است؛ صحبت کن و تا پایان پاسخ دکمه را نگه دار.");
-  startRecognitionSegment();
+  if(canRecord){holdMode="media";void startFullRecording();}
+  else{
+    holdMode="browser";
+    info("تشخیص گفتار مرورگر ممکن است ناقص باشد؛ در پایان، متن را بررسی و دستی ارسال کن.");
+    startRecognitionSegment();
+  }
 }
 function releaseHolding(send=true){
   if(!holding)return;
   holding=false;releasePending=send;setHoldState(false);
-  if(!send){
-    if(recognition){try{recognition.abort();}catch{}recognition=null;}
-    clearTimeout(releaseTimer);releaseTimer=null;
-    info("ضبط لغو شد. برای پاسخ مجدد دکمه را نگه دار.");
+  if(holdMode==="media"){
+    clearTimeout(maxRecordingTimer);maxRecordingTimer=null;
+    if(!send){releasePending=false;mediaChunks=[];}
+    if(recognition){
+      try{recognition.stop();}catch{/* ASR is only a preview while recording. */}
+    }
+    if(mediaRecorder&&mediaRecorder.state!=="inactive"){
+      try{mediaRecorder.stop();}catch{clearRecordingMedia();releasePending=false;}
+    }else if(!recordingStream&&send){
+      releasePending=false;info("ضبط خیلی کوتاه بود؛ دوباره دکمه را نگه دار.");
+    }
     return;
   }
-  info("ضبط تمام شد؛ در حال تکمیل متن گفتار…");
+  if(!send){
+    releasePending=false;voiceSegments=[];
+    if(recognition){const current=recognition;recognition=null;current.abort();}
+    clearTimeout(releaseTimer);releaseTimer=null;
+    info("ضبط لغو شد. می‌توانی دوباره صحبت کنی.");
+    return;
+  }
   if(recognition){
-    try{recognition.stop();}catch{completeHeldAnswer();}
-    // Safety net for browsers that never dispatch onend after stop().
-    if(releasePending)releaseTimer=setTimeout(completeHeldAnswer,2000);
-  }else completeHeldAnswer();
+    try{recognition.stop();}catch{finishBrowserTranscription();}
+    if(releasePending)releaseTimer=setTimeout(finishBrowserTranscription,2000);
+  }else finishBrowserTranscription();
 }
 $("hold-to-talk").addEventListener("pointerdown",event=>{
   if(event.button!==undefined&&event.button!==0)return;
@@ -211,6 +356,8 @@ async function refresh() {
     if(!token||token.length<30)throw Error("لینک خصوصی معتبر نیست.");
     const inv=await api("lookup");
     aiProvider=inv.ai_provider;
+    persianAudioAvailable=Boolean(inv.persian_audio_available);
+    audioTranscriptionAvailable=Boolean(inv.audio_transcription_available);
     $("details").textContent=inv.candidate+" — "+inv.job;
     $("cv-status").textContent=inv.cv_received?
       "رزومه شما خوانده شد. موضوعات مرتبط: "+(inv.cv_skill_mentions.length?inv.cv_skill_mentions.join("، "):"تجربه‌ها و پروژه‌های رزومه"):
@@ -233,13 +380,13 @@ async function refresh() {
     const deepseek=isChatProvider();
     $("speech-tools").hidden=!deepseek;
     $("hold-to-talk").hidden=!deepseek;
-    $("hold-to-talk").disabled=!deepseek||!aiStarted||!inv.ai_enabled;
+    $("hold-to-talk").disabled=!deepseek||!aiStarted||!inv.ai_enabled||transcribing;
     $("send-text").textContent=deepseek?"ارسال پاسخ و دریافت سؤال بعدی":"ثبت پاسخ متنی";
     $("start").disabled=deepseek?!inv.ai_enabled:!inv.voice_enabled;
     if(deepseek){
       showHistory(inv.ai_messages||[]);
       info(inv.ai_enabled?
-        (Recognition?aiName()+" برای مصاحبه آماده است. می‌توانی با میکروفون یا متن جواب بدهی.":aiName()+" برای مصاحبه متنی آماده است؛ تشخیص صدا در این مرورگر پشتیبانی نمی‌شود."):
+        (audioTranscriptionAvailable?"ضبط کامل پاسخ فعال است؛ دکمه میکروفون را تا پایان صحبت نگه دار.":Recognition?"در این مرورگر فقط تشخیص گفتار موقت فعال است؛ بعد از ضبط، متن را بررسی کن.":"ضبط صوتی در دسترس نیست؛ پاسخ را تایپ کن."):
         "کلید "+aiName()+" در سرور تنظیم نشده است یا مقدار آن نمونه است.");
     }else{
       $("start").textContent="🎙 شروع گفت‌وگو با AI";
@@ -273,7 +420,11 @@ function stop() {
   if(holding)releaseHolding(false);
   if(recognition){const current=recognition;recognition=null;current.abort();}
   releasePending=false;clearTimeout(releaseTimer);releaseTimer=null;
-  if(canSpeak)speechSynthesis.cancel();
+  if(mediaRecorder&&mediaRecorder.state!=="inactive")try{mediaRecorder.stop();}catch{}
+  clearRecordingMedia();
+  stopQuestionAudio();
+  if(recordedAudioURL&&typeof URL!=="undefined")URL.revokeObjectURL(recordedAudioURL);
+  recordedAudioURL=null;$("recorded-audio").hidden=true;
   if(rtc){rtc.close();rtc=null;}
   if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
   $("audio").srcObject=null;
@@ -285,7 +436,7 @@ $("start").addEventListener("click",async()=>{
     if(!aiStarted||needsPersianRepair())await askAI();
     else {
       const last=[...aiHistory].reverse().find(x=>x.role==="interviewer");
-      if(last)speaking(last.text);
+      if(last)void speaking(last.text);
       info("به سؤال گوش کن؛ وقتی آماده شدی دکمه «برای پاسخ‌دادن نگه دار» را فشار بده.");
     }
     return;
@@ -320,8 +471,8 @@ $("start").addEventListener("click",async()=>{
   }catch(error){info(error.message);stop();}
 });
 $("finish").addEventListener("click",async()=>{
-  if(holding||releasePending||aiBusy){
-    info("ابتدا ضبط را تمام کن و از ثبت پاسخ مطمئن شو، سپس مصاحبه را پایان بده.");
+  if(holding||releasePending||aiBusy||transcribing){
+    info("ابتدا ضبط یا تبدیل صدای پاسخ را تمام کن و از ثبت پاسخ مطمئن شو، سپس مصاحبه را پایان بده.");
     return;
   }
   if(!confirm("مصاحبه پایان یابد و برای بررسی کارشناس ثبت شود؟"))return;

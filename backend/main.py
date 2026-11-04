@@ -25,6 +25,7 @@ from .gapgpt import configured as gapgpt_configured, generate_question as gapgpt
 from .matching import classify, match_job
 from .persian import PERSIAN_QUESTION_RULE, is_persian_question
 from .interview_review import generate_interview_review, review_evidence
+from .interview_audio import persian_question_mp3, gapgpt_transcribe_audio
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 APP_ORIGIN = os.getenv("APP_ORIGIN", "https://interview.armember.ir").rstrip("/")
@@ -37,7 +38,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Interview AI", version="0.5.0", lifespan=lifespan)
+app = FastAPI(title="Interview AI", version="0.5.1", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 
 
@@ -106,7 +107,7 @@ class TranscriptIn(TokenIn):
 
 
 class AITurnIn(TokenIn):
-    text: str | None = Field(default=None, min_length=1, max_length=2000)
+    text: str | None = Field(default=None, min_length=1, max_length=6500)
 
 
 class AIReviewIn(BaseModel):
@@ -185,7 +186,7 @@ def candidate_page():
 
 @app.get("/api/v1/health")
 def health():
-    return {"status": "ok", "version": "0.5.0"}
+    return {"status": "ok", "version": "0.5.1"}
 
 
 @app.post("/api/v1/auth/login")
@@ -577,6 +578,10 @@ def public_lookup(payload: TokenIn, db: Session = Depends(get_db)):
             "cv_skill_mentions": [item["skill"] for item in evidence["mentioned_skills"]][:8],
             "ai_provider": provider if chat_mode else "openai",
             "ai_enabled": chat_configured() if chat_mode else False,
+            "persian_audio_available": chat_mode and
+                os.getenv("PERSIAN_TTS_ENABLED", "true").lower() == "true",
+            "audio_transcription_available": provider == "gapgpt" and gapgpt_configured() and
+                os.getenv("GAPGPT_STT_ENABLED", "true").lower() == "true",
             "ai_messages": [{"role": entry["role"], "text": entry["text"]}
                             for entry in prior_ai[-24:]],
             "voice_enabled": not chat_mode and bool(os.getenv("OPENAI_API_KEY", "").strip()) and
@@ -665,6 +670,80 @@ async def candidate_voice(payload: TokenIn, db: Session = Depends(get_db)):
     inv.voice_sessions += 1
     db.commit()
     return secret
+
+
+def require_active_interview(inv: models.Invitation) -> None:
+    """Guard all cost-bearing candidate audio endpoints with consent and schedule."""
+    if inv.status != "confirmed" or not inv.consent_at or not inv.selected_slot:
+        raise HTTPException(403, "مصاحبه فعال و رضایت پردازش لازم است.")
+    selected = datetime.fromisoformat(inv.selected_slot).astimezone(timezone.utc)
+    current = datetime.now(timezone.utc)
+    if not (selected - timedelta(minutes=30) <= current <= selected + timedelta(hours=2)):
+        raise HTTPException(403, "این مصاحبه خارج از زمان تعیین‌شده است.")
+
+
+def audio_hourly_limit(db: Session, inv: models.Invitation, action: str,
+                       max_for_invitation: int = 25) -> None:
+    """Limit repeated costly calls, without disclosing tokens or transcript."""
+    recent = db.scalars(select(models.AuditEvent.id).where(
+        models.AuditEvent.action == action,
+        models.AuditEvent.resource == str(inv.id),
+        models.AuditEvent.created_at >= now() - 3600
+    ).limit(max_for_invitation)).all()
+    if len(recent) >= max_for_invitation:
+        raise HTTPException(429, "سقف درخواست صوتی برای این مصاحبه تکمیل شده است.")
+
+
+@app.post("/api/v1/public/invitation/persian-speech")
+async def candidate_persian_speech(payload: TokenIn, db: Session = Depends(get_db)):
+    inv = get_invitation(db, payload.token)
+    require_active_interview(inv)
+    audio_hourly_limit(db, inv, "audio.persian_speech", 30)
+    questions = [entry for entry in (inv.transcript or [])
+                 if entry.get("source") == "server_llm"]
+    if not questions:
+        raise HTTPException(409, "هنوز سؤالی برای پخش وجود ندارد.")
+    question = questions[-1].get("text", "")
+    if not is_persian_question(question):
+        raise HTTPException(422, "سؤال هنوز فارسی نشده است.")
+    audio = await persian_question_mp3(question)
+    audit(db, None, "audio.persian_speech", str(inv.id))
+    db.commit()
+    return Response(content=audio, media_type="audio/mpeg",
+                    headers={"Content-Disposition": "inline"})
+
+
+@app.post("/api/v1/public/invitation/transcribe-audio")
+async def candidate_transcribe_audio(token: str = Form(..., min_length=30, max_length=200),
+                                     file: UploadFile = File(...),
+                                     db: Session = Depends(get_db)):
+    inv = get_invitation(db, token)
+    require_active_interview(inv)
+    if chat_provider() != "gapgpt" or not gapgpt_configured():
+        raise HTTPException(503, "تبدیل گفتار در حساب متنی فعلی پشتیبانی نمی‌شود.")
+    audio_hourly_limit(db, inv, "audio.transcription", 25)
+    if not any(e.get("source") == "server_llm" for e in (inv.transcript or [])):
+        raise HTTPException(409, "ابتدا سؤال اول مصاحبه را دریافت کن.")
+    limit = 8 * 1024 * 1024
+    audio = bytearray()
+    try:
+        while True:
+            chunk = await file.read(256 * 1024)
+            if not chunk:
+                break
+            if len(audio) + len(chunk) > limit:
+                raise HTTPException(413, "صدای ضبط‌شده بیش از حد بزرگ است.")
+            audio.extend(chunk)
+    finally:
+        await file.close()
+    if len(audio) < 1024:
+        raise HTTPException(422, "صدای ضبط‌شده خیلی کوتاه یا خالی است.")
+    transcript = await gapgpt_transcribe_audio(bytes(audio), file.content_type or "")
+    # Never save the raw recording or ASR result until the candidate submits
+    # the visible transcript as their answer.
+    audit(db, None, "audio.transcription", str(inv.id))
+    db.commit()
+    return {"text": transcript, "characters": len(transcript), "language": "fa"}
 
 
 @app.post("/api/v1/public/invitation/ai-turn")
