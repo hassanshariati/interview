@@ -1,0 +1,25 @@
+name: One-shot production deployment trigger
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deploy-once.yml'
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch existing production deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger approved workflow on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: hassanshariati/interview
+        run: |
+          set -euo pipefail
+          gh workflow run deploy.yml --ref main --repo "$GH_REPO"
