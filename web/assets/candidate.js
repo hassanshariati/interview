@@ -4,6 +4,9 @@ const $=id=>document.getElementById(id);
 let rtc=null,stream=null,recognition=null,known=new Set(),savedSomething=false;
 let holding=false,releasePending=false,releaseTimer=null,voiceSegments=[],draftBeforeVoice="";
 let voiceFinalizeCalled=false;
+let audioTranscriptionAvailable=false,persianAudioAvailable=false;
+let holdMode="",mediaRecorder=null,recordingStream=null,mediaChunks=[],maxRecordingTimer=null;
+let questionAudioURL=null,recordedAudioURL=null,playbackVersion=0,transcribing=false;
 let aiProvider="openai",aiStarted=false,aiHistory=[],aiBusy=false,hasTranscript=false;
 const isChatProvider=()=>["deepseek","gapgpt"].includes(aiProvider);
 const aiName=()=>aiProvider==="gapgpt"?"GapGPT":"DeepSeek";
@@ -44,16 +47,60 @@ function showHistory(items) {
   $("start").textContent=needsPersianRepair()?"بازنویسی سؤال به فارسی":(aiStarted?"🔊 پخش دوباره سؤال":"شروع مصاحبه فارسی با "+aiName());
   $("hold-to-talk").disabled=!aiStarted||needsPersianRepair()||aiBusy;
 }
-function speaking(text) {
-  if(!canSpeak){info("متن سؤال نمایش داده شد؛ این مرورگر تبدیل متن به صدا ندارد.");return;}
+function stopQuestionAudio(){
+  playbackVersion++;
+  const audio=$("question-audio");
+  if(typeof audio.pause==="function")audio.pause();
+  if(questionAudioURL&&typeof URL!=="undefined")URL.revokeObjectURL(questionAudioURL);
+  questionAudioURL=null;
+  audio.hidden=true;
+  if(canSpeak)try{speechSynthesis.cancel();}catch{}
+}
+function localPersianSpeech(text){
+  if(!canSpeak)return false;
   try{
-    speechSynthesis.cancel();
+    const voice=(speechSynthesis.getVoices?.()||[]).find(v=>/^fa[-_]/i.test(v.lang));
+    if(!voice)return false;
     const utterance=new SpeechSynthesisUtterance(text);
-    utterance.lang=$("speech-lang").value;
-    utterance.rate=0.93;
-    utterance.onerror=()=>info("پخش صدا در مرورگر ممکن نیست؛ سؤال را از متن بخوان.");
-    speechSynthesis.speak(utterance);
-  }catch{info("پخش صدا پشتیبانی نمی‌شود؛ می‌توانی سؤال را بخوانی.");}
+    utterance.voice=voice;utterance.lang="fa-IR";utterance.rate=0.93;
+    speechSynthesis.cancel();speechSynthesis.speak(utterance);
+    return true;
+  }catch{return false;}
+}
+async function speaking(text){
+  if(!isChatProvider())return;
+  stopQuestionAudio();
+  const version=playbackVersion;
+  if(!persianAudioAvailable){
+    if(!localPersianSpeech(text))info("این مرورگر صدای فارسی ندارد. متن سؤال را بخوان یا صدای فارسی سرور را فعال کن.");
+    return;
+  }
+  try{
+    info("در حال آماده‌سازی صدای فارسی سؤال…");
+    const response=await fetch("/api/v1/public/invitation/persian-speech",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      credentials:"same-origin",body:JSON.stringify({token})
+    });
+    if(!response.ok){
+      const data=await response.json().catch(()=>({}));
+      throw Error(data.detail||"سرویس صدای فارسی در دسترس نیست");
+    }
+    const blob=await response.blob();
+    if(version!==playbackVersion)return; // Candidate started speaking or a new question arrived.
+    questionAudioURL=URL.createObjectURL(blob);
+    const audio=$("question-audio");
+    audio.src=questionAudioURL;audio.hidden=false;
+    try{
+      await audio.play();
+      info("سؤال به فارسی پخش می‌شود. پس از شنیدن، دکمه میکروفون را نگه دار.");
+    }catch{
+      info("برای شنیدن سؤال فارسی، دکمه پخشِ فایل صوتی را بزن.");
+    }
+  }catch{
+    if(version!==playbackVersion)return;
+    if(localPersianSpeech(text))info("سؤال با صدای فارسیِ نصب‌شده در مرورگر پخش می‌شود.");
+    else info("سرویس صدای فارسی موقتاً در دسترس نیست و مرورگر هم صدای فارسی ندارد. سؤال را از متن بخوان.");
+  }
 }
 async function askAI(text=null) {
   if(aiBusy)return;
@@ -74,11 +121,11 @@ async function askAI(text=null) {
     showHistory(aiHistory);
     $("manual").value="";
     info("سؤال "+Number(result.turn_count).toLocaleString("fa-IR")+" آماده است. جواب را بگو یا بنویس.");
-    speaking(result.question);
+    void speaking(result.question);
   }catch(err){info(err.message||"اتصال به سرویس هوش مصنوعی برقرار نشد.");}
   finally{
     aiBusy=false;$("start").disabled=false;$("send-text").disabled=false;
-    $("hold-to-talk").disabled=!aiStarted||needsPersianRepair();
+    $("hold-to-talk").disabled=!aiStarted||needsPersianRepair()||transcribing;
   }
 }
 function setHoldState(active){
