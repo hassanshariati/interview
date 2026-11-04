@@ -15,3 +15,22 @@ body.admin-page{background:#071320;color:#e6eff7}.admin-login{min-height:100vh;d
 body.candidate-page{background:#091827;color:#f0f8ff;min-height:100vh}.candidate-header{padding:22px 0;border-bottom:1px solid #284357;background:#0c2033}.candidate-header .container{display:flex;justify-content:space-between;align-items:center;gap:15px}.candidate-main{width:min(910px,calc(100% - 36px));margin:45px auto 80px}.candidate-intro h1{font-size:clamp(28px,4vw,45px);margin:12px 0}.candidate-intro p{color:#a5bccc;line-height:2}.candidate-card{background:linear-gradient(145deg,#122b41,#0d2135);border:1px solid #2a4b60;border-radius:22px;padding:27px;margin:19px 0;box-shadow:0 18px 60px #0002}.candidate-card h2{margin:0 0 16px;font-size:21px}.candidate-card p,.candidate-card small{color:#a1b9ca;line-height:2}.candidate-page select,.candidate-page textarea{background:#0a1e31;border-color:#315165;color:#f5ffff}.consent-row{display:flex;align-items:start;gap:11px;line-height:2;cursor:pointer}.consent-row input{width:18px;min-height:auto;height:18px;margin-top:10px;flex:none}.voice-controls{display:flex;gap:12px;flex-wrap:wrap;margin:18px 0}.voice-pulse{width:80px;height:80px;border-radius:50%;display:grid;place-items:center;color:#092d34;font-size:34px;margin:15px auto;background:#46e2c7;box-shadow:0 0 0 14px #2fd6bd21,0 0 0 30px #2fd6bd0d;animation:float 4s ease-in-out infinite}.transcript{min-height:80px;max-height:250px;overflow-y:auto;background:#08192b;border-radius:12px;padding:17px;white-space:pre-wrap;line-height:2;font-size:13px}.candidate-page audio{width:100%;margin:15px 0}.candidate-page button{margin-top:8px}.candidate-page .btn-outline{color:#e9f7ff;border-color:#33536a}.candidate-page .notice{background:#453622;color:#ffe0ad}
 @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-13px)}}@keyframes grow{from{height:5px}to{height:var(--h)}}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 @media(max-width:1050px){.hero-visual{display:none}.hero-inner{grid-template-columns:1fr;min-height:465px;padding:50px 0}.stat-grid{grid-template-columns:repeat(2,1fr)}.admin-content{padding:24px}.jobs-layout{grid-template-columns:210px 1fr}}@media(max-width:780px){.nav-links{gap:12px}.nav-links a:nth-child(2){display:none}.hero-search{grid-template-columns:1fr}.hero-search button{min-height:50px}.jobs-layout,.admin-login,.admin-shell,.charts-grid,.admin-grid{grid-template-columns:1fr}.filter-panel{position:static}.admin-sidebar{height:auto;position:static;display:flex;flex-wrap:wrap;gap:5px;padding:12px}.admin-sidebar .brand{width:100%;margin:0 0 8px}.admin-sidebar .side-heading{display:none}.admin-sidebar .side-link{width:auto;padding:10px}.login-art{display:none}.login-form-container{min-height:100vh}.job-card{align-items:start;flex-direction:column}.job-action{align-items:start}.admin-content{padding:20px 15px 50px}.stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-top{flex-direction:column;align-items:start}.form-grid{grid-template-columns:1fr}.form-grid .full{grid-column:auto}.container{width:min(100% - 24px,1220px)}}
+
+/* Candidate: explicit hold-to-speak interaction, with visual recording state. */
+.candidate-page .hold-to-talk{
+  color:#071e2e;background:#64e7d1;border:1px solid #a2faec;
+  border-radius:15px;padding:14px 24px;font-weight:800;touch-action:none;
+  user-select:none;-webkit-user-select:none;min-height:52px;
+  transition:background .15s ease,box-shadow .15s ease,transform .15s ease;
+}
+.candidate-page .hold-to-talk.recording{
+  background:#fb7185;color:#3e0714;border-color:#fecdd3;
+  box-shadow:0 0 0 6px #fb718524;
+  transform:scale(1.01);
+}
+.candidate-page .hold-to-talk:disabled{
+  cursor:not-allowed;opacity:.48;box-shadow:none;
+}
+.candidate-page .hold-to-talk:focus-visible{
+  outline:3px solid #f5d07b;outline-offset:4px;
+}
