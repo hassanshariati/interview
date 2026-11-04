@@ -1,0 +1,24 @@
+{
+  "name": "Interview AI — email delivery",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {"httpMethod": "POST", "path": "interview-email", "authentication": "headerAuth", "responseMode": "responseNode", "options": {}},
+      "id": "interview-webhook", "name": "Authenticated email webhook", "type": "n8n-nodes-base.webhook", "typeVersion": 2, "position": [0, 0], "webhookId": "interview-email"
+    },
+    {
+      "parameters": {"fromEmail": "={{ $json.body.from }}", "toEmail": "={{ $json.body.to }}", "subject": "={{ $json.body.subject }}", "emailFormat": "text", "text": "={{ $json.body.text }}", "options": {"appendAttribution": false}},
+      "id": "interview-send", "name": "Send email", "type": "n8n-nodes-base.emailSend", "typeVersion": 2.1, "position": [260, 0]
+    },
+    {
+      "parameters": {"respondWith": "json", "responseBody": "{\"status\":\"sent\"}", "options": {"responseCode": 200}},
+      "id": "interview-response", "name": "Confirm sent", "type": "n8n-nodes-base.respondToWebhook", "typeVersion": 1.4, "position": [520, 0]
+    }
+  ],
+  "connections": {
+    "Authenticated email webhook": {"main": [[{"node": "Send email", "type": "main", "index": 0}]]},
+    "Send email": {"main": [[{"node": "Confirm sent", "type": "main", "index": 0}]]}
+  },
+  "settings": {"executionOrder": "v1", "saveDataErrorExecution": "none", "saveDataSuccessExecution": "none", "saveManualExecutions": false, "saveExecutionProgress": false},
+  "pinData": {}, "tags": []
+}

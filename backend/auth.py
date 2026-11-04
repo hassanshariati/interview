@@ -62,7 +62,7 @@ def login_rate_limit(ip_and_account: str):
 
 
 def check_credentials(db: Session, email: str, password: str):
-    account = db.scalar(select(models.User).where(models.User.email == email.lower()))
+    account = db.scalar(select(models.User).where(models.User.email == email.strip().lower()))
     if not account:
         verify(password, DUMMY_HASH)
         return None

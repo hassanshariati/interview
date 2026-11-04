@@ -1,0 +1,3 @@
+B Yekan — Copyright (c) 2000 Borna Rayaneh.
+Original unmodified font: https://github.com/intuxicated/css-persian/blob/master/fonts/BYekan.ttf
+Bundled at the project owner's request. Original embedded copyright is preserved.
