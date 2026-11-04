@@ -23,3 +23,5 @@ jobs:
         run: |
           set -euo pipefail
           gh workflow run deploy.yml --ref main --repo "$GH_REPO"
+
+# Retry after aligning the production runner labels with registered self-hosted runner.
