@@ -1,0 +1,44 @@
+name: Generate knowledge graph (Graphify)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  graphify:
+    name: Analyze repository code
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install official Graphify CLI
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install graphifyy
+          graphify --help
+
+      - name: Extract local code knowledge graph
+        env:
+          GRAPHIFY_BACKEND: none
+        run: |
+          graphify extract . --code-only
+
+      - name: Upload private graph artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: graphify-code-graph
+          path: graphify-out/
+          if-no-files-found: error
+          retention-days: 7
