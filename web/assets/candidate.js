@@ -344,6 +344,8 @@ async function refresh() {
     if(!token||token.length<30)throw Error("لینک خصوصی معتبر نیست.");
     const inv=await api("lookup");
     aiProvider=inv.ai_provider;
+    persianAudioAvailable=Boolean(inv.persian_audio_available);
+    audioTranscriptionAvailable=Boolean(inv.audio_transcription_available);
     $("details").textContent=inv.candidate+" — "+inv.job;
     $("cv-status").textContent=inv.cv_received?
       "رزومه شما خوانده شد. موضوعات مرتبط: "+(inv.cv_skill_mentions.length?inv.cv_skill_mentions.join("، "):"تجربه‌ها و پروژه‌های رزومه"):
@@ -366,13 +368,13 @@ async function refresh() {
     const deepseek=isChatProvider();
     $("speech-tools").hidden=!deepseek;
     $("hold-to-talk").hidden=!deepseek;
-    $("hold-to-talk").disabled=!deepseek||!aiStarted||!inv.ai_enabled;
+    $("hold-to-talk").disabled=!deepseek||!aiStarted||!inv.ai_enabled||transcribing;
     $("send-text").textContent=deepseek?"ارسال پاسخ و دریافت سؤال بعدی":"ثبت پاسخ متنی";
     $("start").disabled=deepseek?!inv.ai_enabled:!inv.voice_enabled;
     if(deepseek){
       showHistory(inv.ai_messages||[]);
       info(inv.ai_enabled?
-        (Recognition?aiName()+" برای مصاحبه آماده است. می‌توانی با میکروفون یا متن جواب بدهی.":aiName()+" برای مصاحبه متنی آماده است؛ تشخیص صدا در این مرورگر پشتیبانی نمی‌شود."):
+        (audioTranscriptionAvailable?"ضبط کامل پاسخ فعال است؛ دکمه میکروفون را تا پایان صحبت نگه دار.":Recognition?"در این مرورگر فقط تشخیص گفتار موقت فعال است؛ بعد از ضبط، متن را بررسی کن.":"ضبط صوتی در دسترس نیست؛ پاسخ را تایپ کن."):
         "کلید "+aiName()+" در سرور تنظیم نشده است یا مقدار آن نمونه است.");
     }else{
       $("start").textContent="🎙 شروع گفت‌وگو با AI";
@@ -406,7 +408,11 @@ function stop() {
   if(holding)releaseHolding(false);
   if(recognition){const current=recognition;recognition=null;current.abort();}
   releasePending=false;clearTimeout(releaseTimer);releaseTimer=null;
-  if(canSpeak)speechSynthesis.cancel();
+  if(mediaRecorder&&mediaRecorder.state!=="inactive")try{mediaRecorder.stop();}catch{}
+  clearRecordingMedia();
+  stopQuestionAudio();
+  if(recordedAudioURL&&typeof URL!=="undefined")URL.revokeObjectURL(recordedAudioURL);
+  recordedAudioURL=null;$("recorded-audio").hidden=true;
   if(rtc){rtc.close();rtc=null;}
   if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
   $("audio").srcObject=null;
@@ -418,7 +424,7 @@ $("start").addEventListener("click",async()=>{
     if(!aiStarted||needsPersianRepair())await askAI();
     else {
       const last=[...aiHistory].reverse().find(x=>x.role==="interviewer");
-      if(last)speaking(last.text);
+      if(last)void speaking(last.text);
       info("به سؤال گوش کن؛ وقتی آماده شدی دکمه «برای پاسخ‌دادن نگه دار» را فشار بده.");
     }
     return;
@@ -453,8 +459,8 @@ $("start").addEventListener("click",async()=>{
   }catch(error){info(error.message);stop();}
 });
 $("finish").addEventListener("click",async()=>{
-  if(holding||releasePending||aiBusy){
-    info("ابتدا ضبط را تمام کن و از ثبت پاسخ مطمئن شو، سپس مصاحبه را پایان بده.");
+  if(holding||releasePending||aiBusy||transcribing){
+    info("ابتدا ضبط یا تبدیل صدای پاسخ را تمام کن و از ثبت پاسخ مطمئن شو، سپس مصاحبه را پایان بده.");
     return;
   }
   if(!confirm("مصاحبه پایان یابد و برای بررسی کارشناس ثبت شود؟"))return;
