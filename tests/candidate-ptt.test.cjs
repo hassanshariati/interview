@@ -8,7 +8,7 @@ const vm=require("node:vm");
 const script=fs.readFileSync(path.join(__dirname,"..","web","assets","candidate.js"),"utf8");
 const flush=()=>new Promise(done=>setImmediate(done));
 
-function harness({audioRecording=true}={}){
+function harness({audioRecording=true,shortTranscript=false}={}){
   const nodes=new Map();
   function node(id){
     if(!nodes.has(id)){
@@ -74,7 +74,8 @@ function harness({audioRecording=true}={}){
         turn_count:payload.text?2:1,already_started:false
       })};
       if(url.endsWith("/transcribe-audio"))return {ok:true,json:async()=>({
-        text:longAnswer,characters:longAnswer.length,language:"fa"
+        text:shortTranscript?"سلام بله روزتون خوش کار کردم":longAnswer,
+        characters:shortTranscript?30:longAnswer.length,language:"fa"
       })};
       throw Error("unexpected request "+url);
     },
@@ -105,11 +106,40 @@ test("entire long recording is sent to STT only after pointer release",async()=>
   assert.equal(sent.length,1);
   assert.equal(sent[0].payload.get("token"),"v".repeat(48));
   assert.ok(sent[0].payload.get("file").size>=3000);
+  // NEVER send to the LLM merely because the mic button was released.
+  const beforeConfirmation=h.requests.filter(r=>r.url.endsWith("/ai-turn"));
+  assert.equal(beforeConfirmation.length,1);
+  assert.equal(h.node("manual").value,h.longAnswer);
+  assert.equal(h.node("answer-review").hidden,false);
+  assert.match(h.node("answer-review").textContent,/پیش‌نویس/);
+  assert.match(h.node("send-text").textContent,/تأیید و ارسال/);
+  assert.equal(h.recognition(),null); // no competing browser ASR during full MediaRecorder capture
+  assert.equal(h.stopped(),true);
+  // A candidate can edit the transcript before any follow-up is generated.
+  h.node("manual").value+=" و جزئیات دیگری هم اضافه کردم";
+  await h.node("send-text").handlers.get("click")();
+  await flush();
   const turns=h.requests.filter(r=>r.url.endsWith("/ai-turn"));
   assert.equal(turns.length,2);
-  assert.equal(turns[1].payload.text,h.longAnswer);
+  assert.ok(turns[1].payload.text.endsWith("جزئیات دیگری هم اضافه کردم"));
   assert.ok(turns[1].payload.text.length>500);
-  assert.equal(h.stopped(),true);
+  assert.equal(h.node("manual").value,"");
+  assert.equal(h.node("answer-review").hidden,true);
+});
+
+test("short transcript is displayed for review and NEVER auto-submitted",async()=>{
+  const h=harness({shortTranscript:true});
+  await flush();
+  await h.node("start").handlers.get("click")();
+  h.node("hold-to-talk").handlers.get("pointerdown")({button:0,pointerId:4,preventDefault(){}});
+  await flush();
+  h.node("hold-to-talk").handlers.get("pointerup")({preventDefault(){}});
+  await flush();await flush();
+  assert.equal(h.node("manual").value,"سلام بله روزتون خوش کار کردم");
+  assert.equal(h.node("answer-review").hidden,false);
+  assert.equal(h.requests.filter(r=>r.url.endsWith("/ai-turn")).length,1);
+  assert.ok(h.node("recorded-audio").src.startsWith("blob:"));
+  // Clicking while a recording/transcription is active must not send a partial draft.
 });
 
 test("browser-only short recognition is not silently sent as a complete answer",async()=>{
