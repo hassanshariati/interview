@@ -1,0 +1,33 @@
+name: Temporary audio-status diagnostic
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/audio-status-diagnostic-once.yml"
+permissions:
+  contents: read
+jobs:
+  audio-status:
+    runs-on: [self-hosted, Linux, X64]
+    environment: production
+    timeout-minutes: 3
+    steps:
+      - name: Aggregate recent audio request statuses only
+        shell: bash
+        run: |
+          cd /opt/interview-ai
+          python3 - <<'PY'
+          import collections, re, subprocess
+          result = subprocess.run(
+              ["docker","compose","logs","--no-color","--since=5h","api","proxy"],
+              capture_output=True, text=True, timeout=30)
+          counts=collections.Counter()
+          for line in result.stdout.splitlines():
+              if '/api/v1/public/invitation/transcribe-audio' not in line:
+                  continue
+              code=re.search(r'POST /api/v1/public/invitation/transcribe-audio\s+HTTP/[\d.]+["\s]+(\d{3})',line)
+              if code:
+                  counts[code.group(1)]+=1
+          print("AUDIO_ENDPOINT_STATUS_COUNTS="+repr(dict(sorted(counts.items()))))
+          print("AUDIO_LOG_SAMPLING_OK="+str(result.returncode==0))
+          PY
