@@ -1,40 +1,123 @@
 "use strict";
 const token=decodeURIComponent(location.hash.slice(1));
 const $=id=>document.getElementById(id);
-let rtc=null,stream=null,known=new Set(),savedSomething=false;
+let rtc=null,stream=null,recognition=null,known=new Set(),savedSomething=false;
+let aiProvider="openai",aiStarted=false,aiHistory=[],aiBusy=false,hasTranscript=false;
+const Recognition=window.SpeechRecognition||window.webkitSpeechRecognition;
+const canSpeak=typeof window.speechSynthesis!=="undefined"&&typeof window.SpeechSynthesisUtterance==="function";
+const addText=(line)=>{
+  const box=$("messages");
+  if(!hasTranscript){box.textContent="";hasTranscript=true;}
+  box.textContent+=line+"\n\n";
+  box.scrollTop=box.scrollHeight;
+};
 function status(text){$("status").textContent=text;}
+function info(text){$("rtc-status").textContent=text;}
 async function api(endpoint,fields={}) {
   const response=await fetch("/api/v1/public/invitation/"+endpoint,{
-    method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token,...fields})});
+    method:"POST",headers:{"Content-Type":"application/json"},
+    credentials:"same-origin",body:JSON.stringify({token,...fields})});
   const data=await response.json().catch(()=>({detail:"خطا در سرویس"}));
   if(!response.ok)throw Error(typeof data.detail==="string"?data.detail:"درخواست ناموفق بود");
   return data;
+}
+function showHistory(items) {
+  aiHistory=items;hasTranscript=false;
+  $("messages").textContent="";
+  for(const item of items)
+    addText((item.role==="candidate"?"داوطلب: ":"مصاحبه‌گر AI: ")+item.text);
+  if(!items.length)$("messages").textContent="بعد از شروع مصاحبه، سؤال‌ها و جواب‌ها اینجا نمایش داده می‌شوند.";
+  aiStarted=items.some(item=>item.role==="interviewer");
+  $("start").textContent=aiStarted?"🎙 ضبط پاسخ صوتی":"شروع مصاحبه با DeepSeek";
+}
+function speaking(text) {
+  if(!canSpeak){info("متن سؤال نمایش داده شد؛ این مرورگر تبدیل متن به صدا ندارد.");return;}
+  try{
+    speechSynthesis.cancel();
+    const utterance=new SpeechSynthesisUtterance(text);
+    utterance.lang=$("speech-lang").value;
+    utterance.rate=0.93;
+    utterance.onerror=()=>info("پخش صدا در مرورگر ممکن نیست؛ سؤال را از متن بخوان.");
+    speechSynthesis.speak(utterance);
+  }catch{info("پخش صدا پشتیبانی نمی‌شود؛ می‌توانی سؤال را بخوانی.");}
+}
+async function askAI(text=null) {
+  if(aiBusy)return;
+  if(!$("consent").checked){status("ابتدا رضایت پردازش اطلاعات را ثبت کن.");return;}
+  if(text!==null&&!String(text).trim()){info("ابتدا پاسخ را بنویس یا با میکروفون بگو.");return;}
+  if(text!==null&&!aiStarted){info("ابتدا با دکمه شروع، سؤال اول را دریافت کن.");return;}
+  aiBusy=true;$("start").disabled=true;$("send-text").disabled=true;
+  info(text===null?"در حال آماده‌سازی سؤال اول…":"در حال تحلیل پاسخ و تولید سؤال بعدی…");
+  try{
+    const result=await api("ai-turn",text===null?{}:{text:String(text).trim()});
+    if(text!==null)aiHistory.push({role:"candidate",text:String(text).trim()});
+    if(text!==null||!aiStarted)aiHistory.push({role:"interviewer",text:result.question});
+    showHistory(aiHistory);
+    $("manual").value="";
+    info("سؤال "+Number(result.turn_count).toLocaleString("fa-IR")+" آماده است. جواب را بگو یا بنویس.");
+    speaking(result.question);
+  }catch(err){info(err.message||"اتصال به DeepSeek برقرار نشد.");}
+  finally{aiBusy=false;$("start").disabled=false;$("send-text").disabled=false;}
+}
+function listen() {
+  if(!Recognition){info("تشخیص گفتار در این مرورگر پشتیبانی نمی‌شود. پاسخ را تایپ کن؛ AI سؤال بعدی را می‌پرسد.");return;}
+  if(recognition)return;
+  if(canSpeak)speechSynthesis.cancel();
+  try{
+    recognition=new Recognition();
+    const current=recognition;
+    current.lang=$("speech-lang").value;
+    current.continuous=false;current.interimResults=false;current.maxAlternatives=1;
+    current.onresult=e=>{
+      const answer=Array.from(e.results).map(result=>result[0]?.transcript||"").join(" ").trim();
+      if(!answer)return;
+      $("manual").value=answer;
+      info("پاسخ شنیده شد. در حال ارسال به DeepSeek…");
+      askAI(answer);
+    };
+    current.onerror=e=>info("خطای تشخیص صدا: "+(e.error||"نامشخص")+". می‌توانی پاسخ را تایپ کنی.");
+    current.onend=()=>{if(recognition===current)recognition=null;};
+    current.start();
+    info("میکروفون فعال است. پاسخ سؤال را بگو؛ گفتار شناسایی‌شده به AI ارسال می‌شود.");
+  }catch(err){recognition=null;info("میکروفون فعال نشد. مجوز مرورگر را بررسی کن یا پاسخ را بنویس.");}
 }
 async function refresh() {
   try{
     if(!token||token.length<30)throw Error("لینک خصوصی معتبر نیست.");
     const inv=await api("lookup");
+    aiProvider=inv.ai_provider;
     $("details").textContent=inv.candidate+" — "+inv.job;
     $("cv-status").textContent=inv.cv_received?
-      "رزومه شما خوانده شد. موضوعات مرتبط: "+(inv.cv_skill_mentions.length?inv.cv_skill_mentions.join("، "):"پروژه‌ها و تجربه‌های درج‌شده در رزومه"):
-      "رزومه‌ای دریافت نشده؛ سؤال‌ها بر اساس مهارت‌های شغل و توضیحات شما خواهند بود.";
+      "رزومه شما خوانده شد. موضوعات مرتبط: "+(inv.cv_skill_mentions.length?inv.cv_skill_mentions.join("، "):"تجربه‌ها و پروژه‌های رزومه"):
+      "رزومه‌ای دریافت نشده؛ پرسش‌ها براساس مهارت‌های موقعیت شغلی خواهند بود.";
     $("choose").hidden=inv.status!=="pending";
     $("voice").hidden=inv.status!=="confirmed";
     if(inv.status==="finished"){status("مصاحبه پایان یافته و جهت بررسی انسانی ثبت شده است.");return;}
-    if(inv.status==="pending") {
+    if(inv.status==="pending"){
       const select=$("slot");select.replaceChildren();
-      for(const value of inv.slots) {
+      for(const value of inv.slots){
         const option=document.createElement("option");option.value=value;
         option.textContent=new Date(value).toLocaleString("fa-IR",{dateStyle:"full",timeStyle:"short"});
         select.append(option);
       }
       status("زمان مناسب را انتخاب کن.");
-    } else {
+    }else{
       status("جلسه آماده است · "+new Date(inv.selected_slot).toLocaleString("fa-IR",{dateStyle:"short",timeStyle:"short"}));
     }
     $("consent").checked=inv.consent;
-    $("start").disabled=!inv.voice_enabled;
-    if(!inv.voice_enabled)$("rtc-status").textContent="اتصال صوتی AI هنوز روی سرور پیکربندی نشده است. ثبت متن دستی جایگزین مصاحبه AI نیست.";
+    const deepseek=aiProvider==="deepseek";
+    $("speech-tools").hidden=!deepseek;
+    $("send-text").textContent=deepseek?"ارسال پاسخ و دریافت سؤال بعدی":"ثبت پاسخ متنی";
+    $("start").disabled=deepseek?!inv.ai_enabled:!inv.voice_enabled;
+    if(deepseek){
+      showHistory(inv.ai_messages||[]);
+      info(inv.ai_enabled?
+        (Recognition?"DeepSeek متصل است. برای شروع مصاحبه کلیک کن؛ می‌توانی با میکروفون یا متن جواب بدهی.":"DeepSeek متصل است؛ تشخیص گفتار در این مرورگر پشتیبانی نمی‌شود، اما مصاحبه متنی فعال است."):
+        "کلید DeepSeek در سرور تنظیم نشده است یا مقدار آن نمونه است.");
+    }else{
+      $("start").textContent="🎙 شروع گفت‌وگو با AI";
+      if(!inv.voice_enabled)info("مصاحبه صوتی OpenAI روی سرور فعال نیست؛ ثبت متن دستی به‌تنهایی مصاحبه AI نیست.");
+    }
   }catch(error){status(error.message);$("choose").hidden=true;$("voice").hidden=true;}
 }
 $("confirm").addEventListener("click",async()=>{
@@ -42,8 +125,8 @@ $("confirm").addEventListener("click",async()=>{
   catch(error){status(error.message);}
 });
 $("consent").addEventListener("change",async()=>{
-  if(!$("consent").checked){status("برای ادامه موافقت قبلی برقرار است؛ لغو پردازش را از پشتیبانی درخواست کن.");return;}
-  try{await api("consent",{accepted:true});status("رضایت ثبت شد.");}
+  if(!$("consent").checked){status("برای لغو پردازش قبلی با پشتیبانی تماس بگیر.");return;}
+  try{await api("consent",{accepted:true});status("رضایت پردازش ثبت شد.");}
   catch(error){status(error.message);$("consent").checked=false;}
 });
 async function save(role,text) {
@@ -51,55 +134,57 @@ async function save(role,text) {
   text=text.slice(0,2000);const key=role+":"+text;
   if(known.has(key))return;
   await api("transcript",{role,text});known.add(key);
-  const box=$("messages");
-  if(!savedSomething){box.textContent="";savedSomething=true;}
-  box.textContent+=(role==="candidate"?"داوطلب: ":"مصاحبه‌گر: ")+text+"\n\n";
-  box.scrollTop=box.scrollHeight;
+  addText((role==="candidate"?"داوطلب: ":"مصاحبه‌گر: ")+text);
 }
 $("send-text").addEventListener("click",async()=>{
-  if(!$("consent").checked){status("ابتدا رضایت خود را ثبت کن.");return;}
+  if(!$("consent").checked){status("ابتدا رضایت را ثبت کن.");return;}
+  if(aiProvider==="deepseek"){await askAI($("manual").value);return;}
   try{await save("candidate",$("manual").value);$("manual").value="";}
   catch(error){status(error.message);}
 });
 function stop() {
+  if(recognition){const current=recognition;recognition=null;current.abort();}
+  if(canSpeak)speechSynthesis.cancel();
   if(rtc){rtc.close();rtc=null;}
   if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
   $("audio").srcObject=null;
 }
-$("stop").addEventListener("click",()=>{stop();$("rtc-status").textContent="میکروفون قطع شد."});
+$("stop").addEventListener("click",()=>{stop();info("میکروفون و پخش صدا متوقف شد.");});
 $("start").addEventListener("click",async()=>{
-  if(!$("consent").checked){status("ابتدا رضایت با پردازش صوت را ثبت کن.");return;}
-  stop();$("rtc-status").textContent="در حال دریافت مجوز میکروفون…";
-  try {
+  if(!$("consent").checked){status("ابتدا با پردازش صدا و متن موافقت کن.");return;}
+  if(aiProvider==="deepseek"){
+    if(!aiStarted)await askAI();
+    else listen();
+    return;
+  }
+  stop();info("در حال دریافت مجوز میکروفون…");
+  try{
     const secret=await api("voice-secret");
     rtc=new RTCPeerConnection();
     stream=await navigator.mediaDevices.getUserMedia({audio:true});
     for(const track of stream.getTracks())rtc.addTrack(track,stream);
     rtc.ontrack=event=>{$("audio").srcObject=event.streams[0];};
     rtc.onconnectionstatechange=()=>{
-      if(rtc&&["failed","disconnected"].includes(rtc.connectionState))$("rtc-status").textContent="ارتباط قطع شده است.";
+      if(rtc&&["failed","disconnected"].includes(rtc.connectionState))info("ارتباط قطع شده است.");
     };
     const channel=rtc.createDataChannel("oai-events");
-    channel.onopen=()=>{
-      $("rtc-status").textContent="اتصال برقرار است؛ می‌توانی صحبت کنی.";
-      channel.send(JSON.stringify({type:"response.create"}));
-    };
+    channel.onopen=()=>{info("اتصال برقرار است؛ می‌توانی صحبت کنی.");channel.send(JSON.stringify({type:"response.create"}));};
     channel.onmessage=event=>{
-      try {
+      try{
         const data=JSON.parse(event.data);
-        if(data.type==="error"){$("rtc-status").textContent="خطای سرویس صوتی: "+(data.error?.message||"ارتباط ناموفق بود");return;}
+        if(data.type==="error"){info("خطای سرویس صوتی: "+(data.error?.message||"ارتباط ناموفق بود"));return;}
         if(data.type==="conversation.item.input_audio_transcription.completed")
-          save("candidate",data.transcript).catch(()=>{status("ثبت بخشی از متن ناموفق بود.");});
+          save("candidate",data.transcript).catch(()=>status("ثبت بخشی از متن ناموفق بود."));
         if(data.type==="response.output_audio_transcript.done")
-          save("interviewer",data.transcript).catch(()=>{status("ثبت بخشی از متن ناموفق بود.");});
-      }catch{/* ignore malformed voice events */}
+          save("interviewer",data.transcript).catch(()=>status("ثبت بخشی از متن ناموفق بود."));
+      }catch{/* malformed events are ignored */}
     };
     const offer=await rtc.createOffer();await rtc.setLocalDescription(offer);
     const response=await fetch("https://api.openai.com/v1/realtime/calls",{
       method:"POST",headers:{"Authorization":"Bearer "+secret.value,"Content-Type":"application/sdp"},body:offer.sdp});
     if(!response.ok)throw Error("برقراری ارتباط صوتی ناموفق بود: "+response.status);
     await rtc.setRemoteDescription({type:"answer",sdp:await response.text()});
-  }catch(error){$("rtc-status").textContent=error.message;stop();}
+  }catch(error){info(error.message);stop();}
 });
 $("finish").addEventListener("click",async()=>{
   if(!confirm("مصاحبه پایان یابد و برای بررسی کارشناس ثبت شود؟"))return;
