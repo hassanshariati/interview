@@ -39,7 +39,7 @@ def useful_resume_excerpts(text: str, required_skills: list[str]) -> list[str]:
         line = " ".join(line.split())
         if not line or PRIVATE_LINE.search(line) or PROMPT_INJECTION.search(line):
             continue
-        sanitized = EMAIL.sub("[email removed]", WEB.sub("[url removed]", PHONE.sub("[phone removed]", line))
+        sanitized = EMAIL.sub("[email removed]", WEB.sub("[url removed]", PHONE.sub("[phone removed]", line)))
         if len(sanitized) < 12:
             continue
         lower = sanitized.casefold()
