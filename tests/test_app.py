@@ -102,3 +102,96 @@ def test_login_throttle_account_isolation():
     # Both accounts arrive from the same reverse proxy IP; neither should lock the other.
     login_rate_limit("172.16.0.10:bob@example.com")
     _ATTEMPTS.clear()
+
+
+def test_public_portal_application_and_analytics():
+    with TestClient(app) as client:
+        assert client.get("/").status_code == 200
+        assert client.get("/admin").status_code == 200
+        assert client.get("/candidate/").status_code == 200
+        assert client.get("/assets/site.css").status_code == 200
+        assert client.get("/assets/admin.js").status_code == 200
+        assert client.get("/api/v1/public/jobs").status_code == 200
+        assert client.get("/api/v1/admin/analytics").status_code == 401
+        login = client.post("/api/v1/auth/login", json={
+            "email": "admin@example.com", "password": "sufficiently-long-test-admin-password"})
+        assert login.status_code == 200, login.text
+        headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+        create = client.post("/api/v1/jobs", json={
+            "title": "Senior Python Developer", "description": "Build reliable services",
+            "required_skills": ["Python", "FastAPI", "PostgreSQL"]}, headers=headers)
+        assert create.status_code == 200, create.text
+        job_id = create.json()["id"]
+        assert any(j["id"] == job_id for j in client.get("/api/v1/public/jobs", params={"q": "python"}).json())
+        assert client.get("/api/v1/public/jobs", params={"q": "nothingmatches"}).json() == []
+        assert all(j["category"] for j in client.get("/api/v1/public/jobs").json())
+        application = client.post("/api/v1/public/applications", data={
+            "job_id": str(job_id), "full_name": "Public Test Applicant", "email": "public-test@example.com"})
+        assert application.status_code == 200, application.text
+        route = application.json()["interview_path"]
+        assert route.startswith("/candidate/#")
+        token = route.split("#", 1)[1]
+        assert "@" not in route
+        lookup = client.post("/api/v1/public/invitation/lookup", json={"token": token})
+        assert lookup.status_code == 200, lookup.text
+        assert lookup.json()["status"] == "confirmed"
+        assert client.post("/api/v1/public/invitation/transcript", json={
+            "token": token, "role": "candidate", "text": "I used FastAPI."}).status_code == 403
+        consent = client.post("/api/v1/public/invitation/consent", json={"token": token, "accepted": True})
+        assert consent.status_code == 200
+        assert client.post("/api/v1/public/invitation/transcript", json={
+            "token": token, "role": "candidate", "text": "I used FastAPI."}).status_code == 200
+        assert client.post("/api/v1/public/invitation/finish", json={"token": token}).status_code == 200
+        analytics = client.get("/api/v1/admin/analytics")
+        assert analytics.status_code == 200
+        data = analytics.json()
+        assert data["counts"]["finished"] >= 1
+        assert any(j["job_id"] == job_id for j in data["by_job"])
+        assert len(data["activity"]) == 14
+        assert data["competencies"] == [] or all("average" in x for x in data["competencies"])
+        assert all("human_ratings" in item for item in data["recent"])
+
+
+def test_public_application_rate_limit_per_email():
+    with TestClient(app) as client:
+        login = client.post("/api/v1/auth/login", json={
+            "email": "admin@example.com", "password": "sufficiently-long-test-admin-password"})
+        assert login.status_code == 200
+        headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+        jr = client.post("/api/v1/jobs", json={
+            "title": "Accountant", "required_skills": ["Accounting"]}, headers=headers)
+        assert jr.status_code == 200
+        for attempt in range(3):
+            response = client.post("/api/v1/public/applications", data={
+                "job_id": str(jr.json()["id"]), "full_name": "Rate Limit Test",
+                "email": "rate-limit-test@example.com"})
+            assert response.status_code == 200, (attempt, response.text)
+        assert client.post("/api/v1/public/applications", data={
+            "job_id": str(jr.json()["id"]), "full_name": "Rate Limit Test",
+            "email": "rate-limit-test@example.com"}).status_code == 429
+
+
+def test_manager_email_notification_sent_on_finish():
+    with TestClient(app) as client:
+        login = client.post("/api/v1/auth/login", json={
+            "email": "admin@example.com", "password": "sufficiently-long-test-admin-password"})
+        headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+        job = client.post("/api/v1/jobs", headers=headers, json={
+            "title": "Security Analyst", "required_skills": ["Threat modeling"]}).json()
+        start = client.post("/api/v1/public/applications", data={
+            "job_id": str(job["id"]), "full_name": "Notification Candidate",
+            "email": "notify-candidate@example.com"})
+        assert start.status_code == 200, start.text
+        token = start.json()["interview_path"].split("#")[1]
+        assert client.post("/api/v1/public/invitation/consent",
+                           json={"token": token, "accepted": True}).status_code == 200
+        with patch.dict(os.environ, {"MANAGER_REPORT_EMAIL": "manager@example.com",
+                                     "N8N_REPORT_WEBHOOK_URL": ""}), patch("backend.main.send_email") as mocked:
+            finished = client.post("/api/v1/public/invitation/finish", json={"token": token})
+            assert finished.status_code == 200, finished.text
+            assert finished.json()["notification_status"] == "sent"
+            assert mocked.call_count == 1
+            args = mocked.call_args.args
+            assert args[0] == "manager@example.com"
+            assert "Notification Candidate" in args[2]
+            assert "transcript" not in args[2].lower()

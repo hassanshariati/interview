@@ -4,10 +4,12 @@ import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections import Counter, defaultdict
 from urllib.parse import urlparse
 import httpx
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile, Query
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -30,7 +32,8 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Interview AI", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Interview AI", version="0.3.0", lifespan=lifespan)
+app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 
 
 @app.middleware("http")
@@ -113,6 +116,12 @@ def home():
     return FileResponse(WEB_DIR / "index.html")
 
 
+@app.get("/admin/")
+@app.get("/admin")
+def admin_page():
+    return FileResponse(WEB_DIR / "admin.html")
+
+
 @app.get("/candidate/")
 @app.get("/candidate")
 def candidate_page():
@@ -121,7 +130,7 @@ def candidate_page():
 
 @app.get("/api/v1/health")
 def health():
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "ok", "version": "0.3.0"}
 
 
 @app.post("/api/v1/auth/login")
@@ -199,10 +208,96 @@ def create_job(payload: JobIn, db: Session = Depends(get_db), user=Depends(requi
     return {"id": job.id, "title": job.title, "required_skills": job.required_skills}
 
 
+JOB_CATEGORIES = (
+    ("فناوری اطلاعات", ("devops", "developer", "software", "linux", "python", "java", "cloud", "kubernetes",
+                       "docker", "network", "برنامه", "شبکه", "نرم‌افزار", "امنیت", "it", "backend", "frontend")),
+    ("داده و هوش مصنوعی", ("data", "ai", "machine learning", "database", "analytics", "sql", "هوش مصنوعی", "داده")),
+    ("مالی و حسابداری", ("finance", "account", "bank", "financial", "حسابدار", "مالی", "بانک")),
+    ("طراحی و محصول", ("design", "ui", "ux", "product", "graphic", "طراحی", "محصول")),
+    ("بازاریابی و فروش", ("marketing", "sales", "growth", "بازاریاب", "فروش")),
+    ("منابع انسانی و مدیریت", ("hr", "recruit", "management", "human resources", "مدیر", "منابع انسانی")),
+)
+
+
+def job_category(job):
+    description = " ".join([job.title, *(job.required_skills or [])]).casefold()
+    for label, terms in JOB_CATEGORIES:
+        if any(term in description for term in terms):
+            return label
+    return "سایر حوزه‌ها"
+
+
+def job_payload(job):
+    return {"id": job.id, "title": job.title, "description": job.description or "",
+            "required_skills": job.required_skills or [], "category": job_category(job)}
+
+
+@app.get("/api/v1/public/jobs")
+def public_jobs(q: str = Query(default="", max_length=100),
+                category: str = Query(default="", max_length=100),
+                db: Session = Depends(get_db)):
+    """Public, non-sensitive job catalogue. No admin authentication required."""
+    items = db.scalars(select(models.Job).order_by(models.Job.id.desc()).limit(200)).all()
+    query = q.strip().casefold()
+    return [job_payload(j) for j in items
+            if (not category or job_category(j) == category)
+            and (not query or query in " ".join([j.title, j.description or "", *(j.required_skills or [])]).casefold())]
+
+
+@app.post("/api/v1/public/applications")
+async def self_apply(job_id: int = Form(gt=0), full_name: str = Form(min_length=2, max_length=180),
+                     email: EmailStr = Form(), file: UploadFile | None = File(default=None),
+                     db: Session = Depends(get_db)):
+    """Create a short-lived, applicant-owned interview entry. Never expose admin data."""
+    job = db.get(models.Job, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    normalized_email = str(email).strip().lower()
+    last_day = datetime.now(timezone.utc) - timedelta(hours=24)
+    # Database-backed hourly ceiling: protects paid Realtime provisioning even if
+    # a hostile client rotates email addresses (proxy-level limits are also advised).
+    hourly_cap = max(1, min(200, int(os.getenv("PUBLIC_APPLICATIONS_PER_HOUR", "20"))))
+    attempts = db.scalars(select(models.AuditEvent.id).where(
+        models.AuditEvent.action == "application.self_start",
+        models.AuditEvent.created_at >= now() - 3600).limit(hourly_cap)).all()
+    if len(attempts) >= hourly_cap:
+        raise HTTPException(429, "Public interview capacity reached; please retry later")
+    recent = db.scalars(select(models.Candidate.id).where(
+        models.Candidate.email == normalized_email, models.Candidate.created_at >= last_day).limit(3)).all()
+    if len(recent) >= 3:
+        raise HTTPException(429, "Too many applications for this email in the past 24 hours")
+    cv_text, filename = "", ""
+    if file and file.filename:
+        data = await file.read(MAX_BYTES + 1)
+        try:
+            cv_text = parse_cv(file.filename, data)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(422, "Cannot parse document") from exc
+        filename = Path(file.filename).name[:255]
+    candidate = models.Candidate(full_name=full_name.strip(), email=normalized_email, source_filename=filename,
+                                 cv_text=cv_text, job_families=classify(cv_text) if cv_text else [])
+    db.add(candidate)
+    db.flush()
+    token = secrets.token_urlsafe(48)
+    current = datetime.now(timezone.utc).isoformat()
+    inv = models.Invitation(candidate_id=candidate.id, job_id=job.id, token_digest=digest(token),
+                            slots=[current], selected_slot=current, status="confirmed",
+                            expires_at=now() + 2 * 60 * 60, created_at=now())
+    db.add(inv)
+    db.flush()
+    audit(db, None, "application.self_start", str(inv.id))
+    db.commit()
+    # Token is in a fragment, never the HTTP path or query; it grants access to this interview only.
+    return {"interview_path": "/candidate/#" + token, "job_title": job.title,
+            "expires_in_seconds": 7200, "note": "This link is private; your email has not been verified."}
+
+
 @app.get("/api/v1/jobs")
 def list_jobs(db: Session = Depends(get_db), user=Depends(require_admin)):
     items = db.scalars(select(models.Job).order_by(models.Job.id.desc())).all()
-    return [{"id": j.id, "title": j.title, "required_skills": j.required_skills} for j in items]
+    return [job_payload(j) for j in items]
 
 
 @app.post("/api/v1/candidates/upload")
@@ -250,6 +345,43 @@ def add_review(payload: AssessmentIn, db: Session = Depends(get_db), user=Depend
     audit(db, user.id, "assessment.add", str(item.id))
     db.commit()
     return {"id": item.id, "saved": True}
+
+
+@app.get("/api/v1/admin/analytics")
+def analytics(db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Management charts contain only actual submissions and human rubric ratings."""
+    jobs = db.scalars(select(models.Job).order_by(models.Job.id.desc())).all()
+    candidates = db.scalars(select(models.Candidate).order_by(models.Candidate.id.desc())).all()
+    meetings = db.scalars(select(models.Invitation).order_by(models.Invitation.id.desc())).all()
+    assessments = db.scalars(select(models.Assessment).order_by(models.Assessment.id.desc())).all()
+    by_job = Counter(m.job_id for m in meetings)
+    statuses = Counter(m.status for m in meetings)
+    activity = Counter(datetime.fromtimestamp(m.created_at, tz=timezone.utc).date().isoformat() for m in meetings)
+    scored = defaultdict(list)
+    ratings_by_pair = Counter()
+    for a in assessments:
+        scored[a.competency].append(a.score)
+        ratings_by_pair[(a.candidate_id, a.job_id)] += 1
+    names = {c.id: c.full_name for c in candidates}
+    titles = {j.id: j.title for j in jobs}
+    today = datetime.now(timezone.utc).date()
+    trend = [(today - timedelta(days=i)).isoformat() for i in range(13, -1, -1)]
+    return {
+        "counts": {"jobs": len(jobs), "candidates": len(candidates),
+                   "interviews": len(meetings), "finished": statuses["finished"],
+                   "assessments": len(assessments)},
+        "statuses": [{"name": key, "value": statuses[key]} for key in ("pending", "confirmed", "finished")],
+        "by_job": [{"job_id": j.id, "name": j.title, "count": by_job[j.id]} for j in jobs],
+        "activity": [{"day": day, "count": activity[day]} for day in trend],
+        "competencies": [{"name": key, "average": round(sum(values) / len(values), 2),
+                           "count": len(values)} for key, values in sorted(scored.items())],
+        "recent": [{"id": m.id, "candidate_id": m.candidate_id, "job_id": m.job_id,
+                    "candidate": names.get(m.candidate_id, "—"), "job": titles.get(m.job_id, "—"),
+                    "status": m.status, "created_at": m.created_at,
+                    "human_ratings": ratings_by_pair[(m.candidate_id, m.job_id)]}
+                   for m in meetings[:50]],
+        "rating_note": "Scores (0-4) are entered by human reviewers. Missing evaluations are unscored."
+    }
 
 
 @app.get("/api/v1/reports/{candidate_id}/{job_id}")
@@ -421,6 +553,48 @@ def candidate_transcript(payload: TranscriptIn, db: Session = Depends(get_db)):
     return {"saved": True, "count": len(existing), "provenance": "candidate_browser_unverified"}
 
 
+
+def report_ready_notification(candidate, job, invitation):
+    """Best-effort manager alert without sending CV or browser-supplied transcript."""
+    payload = {
+        "event": "interview.finished",
+        "invitation_id": invitation.id,
+        "candidate_id": candidate.id,
+        "candidate_name": candidate.full_name,
+        "job_id": job.id,
+        "job_title": job.title,
+        "report_url": APP_ORIGIN + "/admin",
+        "review_required": True,
+    }
+    webhook = os.getenv("N8N_REPORT_WEBHOOK_URL", "").strip()
+    secret = os.getenv("N8N_REPORT_WEBHOOK_SECRET", "").strip()
+    if webhook:
+        # n8n should use header authentication and HTTPS with a private token.
+        if not webhook.startswith("https://") or len(secret) < 16:
+            return "not_configured"
+        try:
+            with httpx.Client(timeout=10, follow_redirects=False) as client:
+                result = client.post(webhook, json=payload,
+                                     headers={"Authorization": "Bearer " + secret})
+                result.raise_for_status()
+            return "sent"
+        except httpx.HTTPError:
+            return "failed"
+    manager_email = os.getenv("MANAGER_REPORT_EMAIL", "").strip()
+    if not manager_email:
+        return "not_configured"
+    try:
+        send_email(manager_email, "Interview awaiting human review — " + job.title,
+                   f"Interview completed: {candidate.full_name}\n"
+                   f"Job: {job.title}\n"
+                   f"Interview record: {invitation.id}\n"
+                   f"Review the evidence after signing in: {APP_ORIGIN}/admin\n"
+                   "This notice contains only report metadata. The interview is unscored until reviewed.")
+        return "sent"
+    except Exception:
+        return "failed"
+
+
 @app.post("/api/v1/public/invitation/finish")
 def candidate_finish(payload: TokenIn, db: Session = Depends(get_db)):
     inv = get_invitation(db, payload.token)
@@ -429,7 +603,11 @@ def candidate_finish(payload: TokenIn, db: Session = Depends(get_db)):
     inv.status = "finished"
     inv.finished_at = now()
     db.commit()
-    return {"finished": True, "note": "The interview is subject to human evaluation."}
+    candidate = db.get(models.Candidate, inv.candidate_id)
+    job = db.get(models.Job, inv.job_id)
+    delivery = report_ready_notification(candidate, job, inv)
+    return {"finished": True, "notification_status": delivery,
+            "note": "The interview is subject to human evaluation."}
 
 
 @app.post("/api/v1/realtime/client-secret")
