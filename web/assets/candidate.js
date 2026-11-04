@@ -181,7 +181,9 @@ function startRecognitionSegment(){
       const tentative=voiceText([...previews.entries()].sort((a,b)=>a[0]-b[0]).map(x=>x[1]));
       if(confirmed)voiceSegments.push(confirmed);
       else if(tentative)voiceSegments.push(tentative);
-      if(releasePending)finishBrowserTranscription();
+      if(releasePending&&holdMode==="media"){
+        // MediaRecorder owns the final submission; browser ASR is just a backup.
+      }else if(releasePending)finishBrowserTranscription();
       else if(holding)setTimeout(()=>{if(holding)startRecognitionSegment();},150);
     };
     current.start();
@@ -229,7 +231,13 @@ async function sendFullRecording(blob){
     transcribing=false;
     await askAI(answer);
   }catch(error){
-    info("تبدیل صدا ناموفق بود: "+error.message+"؛ صدای ضبط‌شده قابل پخش است. پاسخ را دستی بنویس و ارسال کن.");
+    const tentative=voiceText(voiceSegments);
+    if(tentative){
+      $("manual").value=[draftBeforeVoice,tentative].filter(Boolean).join(" ").trim().slice(0,6500);
+      info("تبدیل فایل کامل ناموفق بود: "+error.message+"؛ متن موقت مرورگر را بررسی و تکمیل کن و سپس ارسال کن. فایل ضبط‌شده هم قابل پخش است.");
+    }else{
+      info("تبدیل صدا ناموفق بود: "+error.message+"؛ صدای ضبط‌شده قابل پخش است. پاسخ را دستی بنویس و ارسال کن.");
+    }
   }finally{
     transcribing=false;$("send-text").disabled=false;$("finish").disabled=false;
     $("hold-to-talk").disabled=!aiStarted||needsPersianRepair()||aiBusy;
@@ -261,6 +269,7 @@ async function startFullRecording(){
       if(releasePending)void sendFullRecording(blob);
     };
     current.start(1000);
+    if(Recognition)startRecognitionSegment(); // best-effort live preview/backup only
     info("تمام صدای پاسخ در حال ضبط است. تا پایان صحبت دکمه را نگه دار (حداکثر ۳ دقیقه).");
     maxRecordingTimer=setTimeout(()=>{
       if(holding){info("حداکثر سه دقیقه ضبط تکمیل شد. در حال ارسال صدای کامل…");releaseHolding(true);}
@@ -299,6 +308,9 @@ function releaseHolding(send=true){
   if(holdMode==="media"){
     clearTimeout(maxRecordingTimer);maxRecordingTimer=null;
     if(!send){releasePending=false;mediaChunks=[];}
+    if(recognition){
+      try{recognition.stop();}catch{/* ASR is only a preview while recording. */}
+    }
     if(mediaRecorder&&mediaRecorder.state!=="inactive"){
       try{mediaRecorder.stop();}catch{clearRecordingMedia();releasePending=false;}
     }else if(!recordingStream&&send){
