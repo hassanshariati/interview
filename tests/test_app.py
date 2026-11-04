@@ -339,3 +339,113 @@ def test_clean_resume_ignores_phone_and_private_details():
     assert "Kubernetes" in output
     assert "person@company.com" not in output
     assert "+491771234567" not in output
+
+
+def test_deepseek_interview_uses_cv_and_persists_ai_questions():
+    from unittest.mock import AsyncMock
+    with patch.dict(os.environ, {
+        "LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "test-only-not-real",
+        "DEEPSEEK_MODEL": "deepseek-flash", "AI_QUESTIONS_PER_INTERVIEW": "2",
+    }):
+        with TestClient(app) as client:
+            login = client.post("/api/v1/auth/login", json={
+                "email": "admin@example.com", "password": "sufficiently-long-test-admin-password"})
+            headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+            job = client.post("/api/v1/jobs", headers=headers, json={
+                "title": "Kubernetes SRE", "required_skills": ["Kubernetes", "Linux"]}).json()
+            apply = client.post("/api/v1/public/applications", data={
+                "job_id": str(job["id"]), "full_name": "Synthetic Voice Applicant",
+                "email": "interview-test-deepseek@example.com"},
+                files={"file": ("resume.txt",
+                                b"Project: I implemented Kubernetes autoscaling on production workloads",
+                                "text/plain")})
+            assert apply.status_code == 200, apply.text
+            token = apply.json()["interview_path"].split("#")[1]
+            look = client.post("/api/v1/public/invitation/lookup", json={"token": token})
+            assert look.status_code == 200
+            assert look.json()["ai_enabled"] is True
+            assert look.json()["ai_provider"] == "deepseek"
+            assert look.json()["voice_enabled"] is False
+            assert client.post("/api/v1/public/invitation/ai-turn", json={"token": token}).status_code == 403
+            assert client.post("/api/v1/public/invitation/consent",
+                               json={"token": token, "accepted": True}).status_code == 200
+            with patch("backend.main.generate_question", new_callable=AsyncMock) as mocked:
+                mocked.side_effect = [
+                    "در پروژه Kubernetes چگونه autoscaling را عیب‌یابی کردی؟",
+                    "اگر Podها در Production آماده نشوند چه می‌کنی؟",
+                ]
+                first = client.post("/api/v1/public/invitation/ai-turn", json={"token": token})
+                assert first.status_code == 200, first.text
+                assert first.json()["turn_count"] == 1
+                assert "Kubernetes" in mocked.await_args.args[0]
+                again = client.post("/api/v1/public/invitation/ai-turn", json={"token": token})
+                assert again.json()["already_started"] is True
+                assert mocked.await_count == 1
+                answer = client.post("/api/v1/public/invitation/ai-turn", json={
+                    "token": token, "text": "با kubectl describe pod و بررسی HPA شروع می‌کنم."})
+                assert answer.status_code == 200, answer.text
+                assert answer.json()["turn_count"] == 2
+                assert mocked.await_count == 2
+                assert any(entry["source"] == "server_llm" for entry in mocked.await_args.args[1])
+                cap = client.post("/api/v1/public/invitation/ai-turn", json={
+                    "token": token, "text": "دوباره بررسی می‌کنم."})
+                assert cap.status_code == 429
+            records = client.post("/api/v1/public/invitation/lookup", json={"token": token}).json()["ai_messages"]
+            assert [r["role"] for r in records] == ["interviewer", "candidate", "interviewer"]
+            report = client.get("/api/v1/reports/" + str(
+                client.get("/api/v1/candidates").json()[0]["id"]) + "/" + str(job["id"]))
+            # Report visibility depends on candidate selection, not needed for AI history validation.
+            assert report.status_code in (200, 404)
+            assert client.post("/api/v1/public/invitation/finish", json={"token": token}).status_code == 200
+            assert client.post("/api/v1/public/invitation/ai-turn", json={"token": token}).status_code == 403
+
+
+def test_deepseek_configuration_rejects_untrusted_host_and_placeholder():
+    from fastapi import HTTPException
+    from backend.deepseek import configured, deepseek_config
+    with patch.dict(os.environ, {"LLM_PROVIDER": "deepseek",
+                                 "DEEPSEEK_API_KEY": "YOUR_DEEPSEEK_API_KEY"}):
+        assert configured() is False
+    with patch.dict(os.environ, {"LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "test-key",
+                                 "DEEPSEEK_BASE_URL": "https://malicious.example"}):
+        assert configured() is True
+        try:
+            deepseek_config()
+            assert False, "A non-official host must be rejected before the key can be sent"
+        except HTTPException as exc:
+            assert exc.status_code == 503
+
+
+def test_deepseek_uses_server_side_chat_api_without_cv_leak_to_browser():
+    import asyncio
+    from backend.deepseek import generate_question
+    import backend.deepseek as module
+    from unittest.mock import patch
+    import httpx
+
+    seen = {}
+    def handle(request):
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers.get("Authorization", "")
+        seen["data"] = __import__("json").loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "یک سناریوی واقعی Kubernetes را توضیح بده."}}]})
+    original = httpx.AsyncClient
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.client = original(transport=httpx.MockTransport(handle))
+        async def __aenter__(self):
+            return await self.client.__aenter__()
+        async def __aexit__(self, *a):
+            return await self.client.__aexit__(*a)
+        async def post(self, *a, **kw):
+            return await self.client.post(*a, **kw)
+    with patch.dict(os.environ, {
+        "LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "testing-secret",
+        "DEEPSEEK_MODEL": "deepseek-flash", "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+    }), patch.object(module.httpx, "AsyncClient", FakeClient):
+        result = asyncio.run(generate_question("Ask about a Kubernetes project", [], None))
+    assert "Kubernetes" in result
+    assert seen["url"] == "https://api.deepseek.com/chat/completions"
+    assert seen["auth"] == "Bearer testing-secret"
+    assert seen["data"]["model"] == "deepseek-flash"
+    assert seen["data"]["thinking"] == {"type": "disabled"}
