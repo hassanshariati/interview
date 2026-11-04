@@ -52,7 +52,7 @@ async def generate_question(instructions: str, prior_turns: list[dict],
             "content": str(turn.get("text", ""))[:1800],
         })
     messages.append({"role": "user", "content": (
-        latest_answer[:2000] if latest_answer is not None else
+        latest_answer[:6500] if latest_answer is not None else
         "مصاحبه را با سلام شروع کن و درباره یک پروژه یا تجربه فنی واقعی "
         "مرتبط با رزومه و نیازهای شغل، یک سؤال کاربردی به فارسی بپرس.")})
     # Standard Chat Completions fields; DeepSeek-specific 'thinking' isn't portable.
