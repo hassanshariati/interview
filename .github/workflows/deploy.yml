@@ -29,7 +29,9 @@ jobs:
   deploy:
     name: Deploy to production via dedicated runner
     needs: test
-    runs-on: [self-hosted, Linux, X64, interview-prod]
+    # Repository production runner advertises default self-hosted / Linux / X64 labels.
+    # Environment protection and test dependency remain enforced.
+    runs-on: [self-hosted, Linux, X64]
     environment: production
     timeout-minutes: 20
     steps:
