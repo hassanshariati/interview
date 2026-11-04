@@ -146,7 +146,7 @@ function startRecognitionSegment(){
         completeHeldAnswer();
       }else if(holding){
         // Browsers may end recognition after a pause. Keep listening while held.
-        startRecognitionSegment();
+        setTimeout(()=>{if(holding)startRecognitionSegment();},180);
       }
     };
     current.start();
@@ -320,6 +320,10 @@ $("start").addEventListener("click",async()=>{
   }catch(error){info(error.message);stop();}
 });
 $("finish").addEventListener("click",async()=>{
+  if(holding||releasePending||aiBusy){
+    info("ابتدا ضبط را تمام کن و از ثبت پاسخ مطمئن شو، سپس مصاحبه را پایان بده.");
+    return;
+  }
   if(!confirm("مصاحبه پایان یابد و برای بررسی کارشناس ثبت شود؟"))return;
   try{stop();await api("finish");await refresh();}
   catch(error){status(error.message);}
