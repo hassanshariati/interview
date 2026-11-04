@@ -524,19 +524,23 @@ def public_consent(payload: ConsentIn, db: Session = Depends(get_db)):
     return {"consent": True}
 
 
-async def realtime_secret(instructions: str):
+async def realtime_secret(instructions: str, safety_identifier: str | None = None):
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key or os.getenv("ENABLE_REALTIME", "false").lower() != "true":
         raise HTTPException(503, "Realtime voice service is not enabled")
     config = {"expires_after": {"anchor": "created_at", "seconds": 90},
-              "session": {"type": "realtime", "model": os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime"),
+              "session": {"type": "realtime", "model": os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1"),
                           "instructions": instructions,
                           "audio": {"input": {"transcription": {"model": "gpt-transcribe"}},
                                     "output": {"voice": "marin"}}}}
+    headers = {"Authorization": f"Bearer {api_key}"}
+    if safety_identifier:
+        # Hash an internal identifier, never email or CV data.
+        headers["OpenAI-Safety-Identifier"] = digest(safety_identifier)
     try:
         async with httpx.AsyncClient(timeout=25) as client:
             resp = await client.post("https://api.openai.com/v1/realtime/client_secrets", json=config,
-                                     headers={"Authorization": f"Bearer {api_key}"})
+                                     headers=headers)
             resp.raise_for_status()
             result = resp.json()
     except httpx.HTTPError as exc:
@@ -562,7 +566,7 @@ async def candidate_voice(payload: TokenIn, db: Session = Depends(get_db)):
     job = db.get(models.Job, inv.job_id)
     candidate = db.get(models.Candidate, inv.candidate_id)
     instructions = build_interview_instructions(job, candidate)
-    secret = await realtime_secret(instructions)
+    secret = await realtime_secret(instructions, safety_identifier="candidate:" + str(candidate.id))
     inv.voice_sessions += 1
     db.commit()
     return secret
