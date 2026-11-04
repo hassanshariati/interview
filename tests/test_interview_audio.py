@@ -81,7 +81,7 @@ def test_audio_routes_restricted_to_consented_interviews_and_server_questions():
                 assert len(inv.transcript) == 1
                 assert answer not in str(inv.transcript)
             assert upload(b"x" * 50).status_code == 422
-            oversized = upload(b"x" * (12*1024*1024 + 200))
+            oversized = upload(b"x" * (8*1024*1024 + 200))
             assert oversized.status_code == 413
 
 
