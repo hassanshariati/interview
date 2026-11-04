@@ -5,6 +5,7 @@ Microsoft Edge neural-voice service; STT uses the configured GapGPT account
 and may incur extra provider costs. Both require candidate consent.
 """
 import asyncio
+import logging
 import os
 import re
 
@@ -12,6 +13,8 @@ import httpx
 from fastapi import HTTPException
 
 from .gapgpt import gapgpt_config
+
+logger = logging.getLogger("interview.stt")
 
 _AUDIO_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,95}$")
 _VOICES = frozenset({"fa-IR-DilaraNeural", "fa-IR-FaridNeural"})
@@ -60,7 +63,12 @@ async def persian_question_mp3(question: str) -> bytes:
 
 
 async def gapgpt_transcribe_audio(audio: bytes, mime: str) -> str:
-    """Request a final transcript of the COMPLETE recorded clip, not interim ASR."""
+    """Transcribe the full recorded clip with bounded retries for transient failures.
+
+    Do not log audio, API tokens, provider response bodies, or candidate data.
+    Retries can incur additional provider costs, so never retry authorization,
+    invalid-file or quota failures.
+    """
     if os.getenv("GAPGPT_STT_ENABLED", "true").lower() != "true":
         raise HTTPException(503, "تبدیل صوت به متن در این سامانه فعال نیست.")
     key, _, base = gapgpt_config()
@@ -77,37 +85,66 @@ async def gapgpt_transcribe_audio(audio: bytes, mime: str) -> str:
     filename = accepted.get(media)
     if not filename:
         raise HTTPException(422, "قالب فایل صدا پشتیبانی نمی‌شود.")
-    # whisper-1 and most OpenAI-compatible gateways accept the Persian hint.
     payload = {"model": model, "response_format": "json"}
     if model == "whisper-1":
         payload["language"] = "fa"
+
+    attempts = max(1, min(2, int(os.getenv("GAPGPT_STT_MAX_ATTEMPTS", "2"))))
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(70.0, connect=10.0),
-            follow_redirects=False,
+            timeout=httpx.Timeout(55.0, connect=10.0), follow_redirects=False
         ) as client:
-            response = await client.post(
-                base + "/audio/transcriptions",
-                headers={"Authorization": "Bearer " + key},
-                files={"file": (filename, audio, media)},
-                data=payload,
-            )
-        if response.status_code in (401, 403):
-            raise HTTPException(503, "کلید API برای تبدیل صوت پذیرفته نشد.")
-        if response.status_code == 404:
-            raise HTTPException(503, "مدل یا مسیر تبدیل صوت در حساب GapGPT فعال نیست.")
-        if response.status_code in (402, 429):
-            raise HTTPException(503, "سقف مصرف یا موجودی API صوتی کافی نیست.")
-        if response.status_code >= 400:
-            raise HTTPException(502, "GapGPT نتوانست فایل صوتی را پردازش کند.")
-        result = response.json()
-        text = result.get("text", "") if isinstance(result, dict) else ""
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("empty transcript")
-        return text.strip()[:6500]
-    except httpx.TimeoutException as exc:
-        raise HTTPException(504, "تبدیل صدای طولانی بیش از حد زمان برد.") from exc
-    except httpx.RequestError as exc:
-        raise HTTPException(502, "اتصال به سرویس تبدیل صدا برقرار نشد.") from exc
-    except (ValueError, TypeError) as exc:
-        raise HTTPException(502, "خروجی تبدیل گفتار به متن معتبر نبود.") from exc
+            for attempt in range(attempts):
+                try:
+                    response = await client.post(
+                        base + "/audio/transcriptions",
+                        headers={"Authorization": "Bearer " + key},
+                        files={"file": (filename, audio, media)},
+                        data=payload,
+                    )
+                except (httpx.TimeoutException, httpx.RequestError) as exc:
+                    kind = "timeout" if isinstance(exc, httpx.TimeoutException) else "connection"
+                    logger.warning("STT upstream %s at attempt %d of %d", kind, attempt+1, attempts)
+                    if attempt + 1 < attempts:
+                        await asyncio.sleep(0.5)
+                        continue
+                    status = 504 if kind == "timeout" else 502
+                    message = ("مهلت پردازش صدا در سرویس به پایان رسید." if status == 504 else
+                               "اتصال به سرویس تبدیل صدا برقرار نشد.")
+                    raise HTTPException(status, message) from exc
+
+                status = response.status_code
+                if status in (500, 502, 503, 504):
+                    logger.warning("STT upstream returned HTTP %d at attempt %d of %d",
+                                   status, attempt+1, attempts)
+                    if attempt + 1 < attempts:
+                        await asyncio.sleep(0.5)
+                        continue
+                    raise HTTPException(502, "سرویس تبدیل گفتار خطای موقت "
+                                        + str(status) + " داد؛ از گزینه تلاش مجدد استفاده کن.")
+                if status in (401, 403):
+                    raise HTTPException(503, "کلید API برای تبدیل صوت پذیرفته نشد.")
+                if status == 404:
+                    raise HTTPException(503, "مدل یا مسیر تبدیل صوت در حساب GapGPT فعال نیست.")
+                if status in (402, 429):
+                    raise HTTPException(503, "سقف مصرف یا موجودی API صوتی کافی نیست.")
+                if status == 413:
+                    raise HTTPException(413, "حجم فایل صوتی برای سرویس تبدیل گفتار زیاد است.")
+                if status in (400, 415, 422):
+                    raise HTTPException(422, "سرویس تبدیل گفتار فایل صوتی را نپذیرفت "
+                                        + "(کد " + str(status) + "). فایل را دوباره ضبط کن.")
+                if status >= 400:
+                    logger.warning("STT upstream rejected request status=%d", status)
+                    raise HTTPException(502, "سرویس تبدیل صوت پاسخ ناموفق داد (کد "
+                                        + str(status) + ").")
+                try:
+                    data = response.json()
+                    transcript = data.get("text", "") if isinstance(data, dict) else ""
+                    if not isinstance(transcript, str) or not transcript.strip():
+                        raise ValueError("empty transcript")
+                except (ValueError, TypeError) as exc:
+                    logger.warning("STT upstream response could not be parsed, status=%d", status)
+                    raise HTTPException(502, "متن قابل‌استفاده‌ای از سرویس تبدیل گفتار دریافت نشد.") from exc
+                return transcript.strip()[:6500]
+    except HTTPException:
+        raise

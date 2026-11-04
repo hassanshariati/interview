@@ -372,3 +372,26 @@ characters. The browser will flag suspiciously short text in relation to
 recording duration, but this is a diagnostic cue, **not a reliable accuracy
 assessment**. Neither raw audio nor automatic candidate evaluations are
 stored from the transcription request itself.
+
+
+## Recovering from audio-to-text provider errors (v0.5.3)
+
+If the audio-to-text API fails, the page shows the returned HTTP code and
+a human-readable error category. The full recorded clip remains accessible
+in the browser through its audio player, and a **تلاش مجدد با همین فایل صوتی**
+button allows the candidate to retry transcription without recording again.
+No draft is sent to the LLM automatically; submission requires confirmation.
+
+The server retries one transient provider HTTP 5xx failure or connection
+error (two attempts maximum, configurable with
+`GAPGPT_STT_MAX_ATTEMPTS=1` or `2`; default 2). Invalid audio, expired
+credentials and credit/rate-limit failures are not retried automatically.
+Retries may incur extra API charges. The app logs only provider error
+category/status, never recording bytes, transcripts, API keys, or the
+provider's raw error body.
+
+**Important:** A recording resides only in the browser session until the
+page is closed or refreshed. Saving the audio locally before reloading the
+page is the safest way to preserve a failed response. A persistent HTTP 502
+means the upstream speech provider or gateway needs further investigation
+or replacement; retries cannot guarantee recovery.

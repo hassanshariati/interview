@@ -8,7 +8,7 @@ const vm=require("node:vm");
 const script=fs.readFileSync(path.join(__dirname,"..","web","assets","candidate.js"),"utf8");
 const flush=()=>new Promise(done=>setImmediate(done));
 
-function harness({audioRecording=true,shortTranscript=false}={}){
+function harness({audioRecording=true,shortTranscript=false,sttFailures=0}={}){
   const nodes=new Map();
   function node(id){
     if(!nodes.has(id)){
@@ -28,6 +28,7 @@ function harness({audioRecording=true,shortTranscript=false}={}){
   let mediaRecorder=null,recognizer=null,trackStopped=false;
   const longAnswer=Array(36).fill("من در یک پروژه Kubernetes سرویس‌های متعدد را بررسی کردم").join("، ");
   const requests=[];
+  let remainingSttFailures=sttFailures;
   class FakeRecognition{
     constructor(){recognizer=this;}
     start(){this.started=true;}
@@ -73,10 +74,16 @@ function harness({audioRecording=true,shortTranscript=false}={}){
           :"سلام! یک تجربه واقعی عیب‌یابی Kubernetes را توضیح بده.",
         turn_count:payload.text?2:1,already_started:false
       })};
-      if(url.endsWith("/transcribe-audio"))return {ok:true,json:async()=>({
-        text:shortTranscript?"سلام بله روزتون خوش کار کردم":longAnswer,
-        characters:shortTranscript?30:longAnswer.length,language:"fa"
-      })};
+      if(url.endsWith("/transcribe-audio")){
+        if(remainingSttFailures>0){
+          remainingSttFailures--;
+          return {ok:false,status:502,json:async()=>({detail:"سرویس تبدیل گفتار موقتاً پاسخگو نبود"})};
+        }
+        return {ok:true,status:200,json:async()=>({
+          text:shortTranscript?"سلام بله روزتون خوش کار کردم":longAnswer,
+          characters:shortTranscript?30:longAnswer.length,language:"fa"
+        })};
+      }
       throw Error("unexpected request "+url);
     },
   };
@@ -125,6 +132,32 @@ test("entire long recording is sent to STT only after pointer release",async()=>
   assert.ok(turns[1].payload.text.length>500);
   assert.equal(h.node("manual").value,"");
   assert.equal(h.node("answer-review").hidden,true);
+});
+
+
+test("failed STT retains the recording and supports retry without re-recording or auto-submit",async()=>{
+  const h=harness({sttFailures:1});
+  await flush();
+  await h.node("start").handlers.get("click")();
+  const btn=h.node("hold-to-talk");
+  btn.handlers.get("pointerdown")({button:0,pointerId:3,preventDefault(){}});
+  await flush();
+  btn.handlers.get("pointerup")({preventDefault(){}});
+  await flush();await flush();
+  assert.equal(h.requests.filter(r=>r.url.endsWith("/transcribe-audio")).length,1);
+  assert.equal(h.requests.filter(r=>r.url.endsWith("/ai-turn")).length,1);
+  assert.equal(h.node("retry-voice").hidden,false);
+  assert.ok(h.node("answer-review").textContent.includes("HTTP 502"));
+  assert.equal(h.node("recorded-audio").hidden,false);
+  const firstFile=h.requests.filter(r=>r.url.endsWith("/transcribe-audio"))[0].payload.get("file");
+  h.node("retry-voice").handlers.get("click")();
+  await flush();await flush();
+  const transcriptions=h.requests.filter(r=>r.url.endsWith("/transcribe-audio"));
+  assert.equal(transcriptions.length,2);
+  assert.equal(transcriptions[1].payload.get("file").size,firstFile.size);
+  assert.equal(h.node("manual").value,h.longAnswer);
+  assert.equal(h.node("retry-voice").hidden,true);
+  assert.equal(h.requests.filter(r=>r.url.endsWith("/ai-turn")).length,1);
 });
 
 test("short transcript is displayed for review and NEVER auto-submitted",async()=>{

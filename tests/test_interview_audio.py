@@ -175,3 +175,110 @@ def test_candidate_can_submit_untruncated_long_transcript_after_review():
                             if event.get("source") == "candidate_ai"]
                 assert len(recorded) == 1
                 assert recorded[0]["text"] == answer
+
+
+def test_stt_retries_one_transient_provider_502_and_succeeds():
+    import backend.interview_audio as audio
+    import httpx
+
+    statuses = [502, 200]
+    calls = []
+    async_client = httpx.AsyncClient
+
+    def transport(request):
+        calls.append({"url": str(request.url), "content": request.content})
+        status = statuses.pop(0)
+        if status == 200:
+            return httpx.Response(200, json={
+                "text": "من در پروژه Kubernetes کلاستر را راه‌اندازی و عیب‌یابی کردم."
+            })
+        return httpx.Response(status, json={"error": "temporary gateway failure"})
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.client = async_client(transport=httpx.MockTransport(transport))
+        async def __aenter__(self):
+            return await self.client.__aenter__()
+        async def __aexit__(self, *args):
+            return await self.client.__aexit__(*args)
+        async def post(self, *args, **kwargs):
+            return await self.client.post(*args, **kwargs)
+
+    with patch.dict(os.environ, {
+        "LLM_PROVIDER": "gapgpt", "GAPGPT_API_KEY": "synthetic-secret",
+        "GAPGPT_BASE_URL": "https://api.gapgpt.app/v1",
+        "GAPGPT_STT_MODEL": "whisper-1", "GAPGPT_STT_MAX_ATTEMPTS": "2",
+    }), patch.object(audio.httpx, "AsyncClient", Client):
+        result = asyncio.run(audio.gapgpt_transcribe_audio(b"fake audio bytes" * 300, "audio/webm"))
+    assert "Kubernetes" in result
+    assert len(calls) == 2
+    assert all(call["url"].endswith("/audio/transcriptions") for call in calls)
+    assert all(b"fake audio bytes" in call["content"] for call in calls)
+    assert all(b"synthetic-secret" not in call["content"] for call in calls)
+
+
+def test_stt_reports_provider_error_without_repeating_invalid_audio():
+    import backend.interview_audio as audio
+    import httpx
+
+    hits = []
+    normal_client = httpx.AsyncClient
+    def transport(request):
+        hits.append(str(request.url))
+        return httpx.Response(400, json={"error": "Invalid audio with private detail"})
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.client = normal_client(transport=httpx.MockTransport(transport))
+        async def __aenter__(self):
+            return await self.client.__aenter__()
+        async def __aexit__(self, *args):
+            return await self.client.__aexit__(*args)
+        async def post(self, *args, **kwargs):
+            return await self.client.post(*args, **kwargs)
+
+    with patch.dict(os.environ, {
+        "LLM_PROVIDER": "gapgpt", "GAPGPT_API_KEY": "synthetic-secret",
+        "GAPGPT_STT_MAX_ATTEMPTS": "2",
+    }), patch.object(audio.httpx, "AsyncClient", Client):
+        try:
+            asyncio.run(audio.gapgpt_transcribe_audio(b"x" * 3000, "audio/webm"))
+            assert False, "Bad audio must be rejected"
+        except HTTPException as exc:
+            assert exc.status_code == 422
+            assert "400" in exc.detail
+            assert "private detail" not in exc.detail
+    assert len(hits) == 1  # Non-transient failures do not waste provider credits.
+
+
+def test_stt_reports_persistent_502_without_revealing_raw_upstream_response():
+    import backend.interview_audio as audio
+    import httpx
+    hits = []
+    normal_client = httpx.AsyncClient
+    def transport(request):
+        hits.append(str(request.url))
+        return httpx.Response(502, text="private provider diagnostics MUST remain server-only")
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.client = normal_client(transport=httpx.MockTransport(transport))
+        async def __aenter__(self):
+            return await self.client.__aenter__()
+        async def __aexit__(self, *args):
+            return await self.client.__aexit__(*args)
+        async def post(self, *args, **kwargs):
+            return await self.client.post(*args, **kwargs)
+
+    with patch.dict(os.environ, {
+        "LLM_PROVIDER": "gapgpt", "GAPGPT_API_KEY": "synthetic-secret",
+        "GAPGPT_STT_MAX_ATTEMPTS": "2",
+    }), patch.object(audio.httpx, "AsyncClient", Client):
+        try:
+            asyncio.run(audio.gapgpt_transcribe_audio(b"x" * 3000, "audio/webm"))
+            assert False, "A failed upstream must not be reported as success"
+        except HTTPException as exc:
+            assert exc.status_code == 502
+            assert "502" in exc.detail
+            assert "private provider diagnostics" not in exc.detail
+    assert len(hits) == 2

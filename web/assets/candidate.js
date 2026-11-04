@@ -8,6 +8,7 @@ let audioTranscriptionAvailable=false,persianAudioAvailable=false;
 let holdMode="",mediaRecorder=null,recordingStream=null,mediaChunks=[],maxRecordingTimer=null;
 let recordingStartedAt=0,lastRecordingSeconds=0;
 let questionAudioURL=null,recordedAudioURL=null,playbackVersion=0,transcribing=false;
+let lastAudioBlob=null;
 let aiProvider="openai",aiStarted=false,aiHistory=[],aiBusy=false,hasTranscript=false;
 const isChatProvider=()=>["deepseek","gapgpt"].includes(aiProvider);
 const aiName=()=>aiProvider==="gapgpt"?"GapGPT":"DeepSeek";
@@ -217,6 +218,9 @@ function clearRecordingMedia(){
 async function sendFullRecording(blob){
   if(!releasePending)return;
   releasePending=false;
+  lastAudioBlob=blob;
+  $("retry-voice").hidden=true;
+  $("retry-voice").disabled=true;
   if(blob.size<1024){info("ضبط صدا خالی است؛ دوباره امتحان کن یا پاسخ را بنویس.");$("send-text").disabled=false;$("finish").disabled=false;return;}
   if(blob.size>8*1024*1024){info("حجم فایل صوتی بزرگ است. پاسخ را کوتاه‌تر ضبط کن یا بنویس.");$("send-text").disabled=false;$("finish").disabled=false;return;}
   if(recordedAudioURL&&typeof URL!=="undefined")URL.revokeObjectURL(recordedAudioURL);
@@ -234,8 +238,11 @@ async function sendFullRecording(blob){
     const response=await fetch("/api/v1/public/invitation/transcribe-audio",{
       method:"POST",credentials:"same-origin",body:form
     });
-    const data=await response.json().catch(()=>({detail:"پاسخ سرویس صوتی معتبر نیست."}));
-    if(!response.ok)throw Error(typeof data.detail==="string"?data.detail:"تبدیل صدا ناموفق بود.");
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok){
+      const reason=typeof data.detail==="string"?data.detail:"درخواست تبدیل صدا در مسیر سرور شکست خورد.";
+      throw Error(reason+" (HTTP "+response.status+")");
+    }
     const transcript=String(data.text||"").trim();
     const answer=[draftBeforeVoice.trim(),transcript].filter(Boolean).join(" ").trim();
     if(!transcript)throw Error("فایل ضبط شده متن قابل‌استفاده‌ای نداشت.");
@@ -252,22 +259,30 @@ async function sendFullRecording(blob){
       wordCount.toLocaleString("fa-IR")+" واژه شناسایی شد.";
     reviewDraft(summary+" "+warning+
       " این یک پیش‌نویس است؛ با فایل ضبط‌شده مقایسه و اصلاح کن، سپس «تأیید و ارسال پاسخ کامل» را بزن.");
+    $("retry-voice").hidden=true;
     info("متن ضبط در کادر پاسخ آماده است. تا تأیید تو هیچ پاسخی به AI ارسال نمی‌شود.");
   }catch(error){
+    $("retry-voice").hidden=!lastAudioBlob;
     const tentative=voiceText(voiceSegments);
     if(tentative){
       $("manual").value=[draftBeforeVoice,tentative].filter(Boolean).join(" ").trim().slice(0,6500);
-      reviewDraft("تبدیل فایل کامل ناموفق بود. متن موقت ممکن است ناقص باشد؛ فایل ضبط‌شده را گوش کن، پاسخ را کامل کن و بعد ارسال کن.");
-      info("تبدیل فایل کامل ناموفق بود: "+error.message+"؛ متن جایگزین را بررسی کن.");
+      reviewDraft("تبدیل فایل کامل ناموفق بود: "+error.message+" متن موقت ممکن است ناقص باشد. فایل ضبط‌شده را بشنو، پاسخ را تکمیل کن یا «تلاش مجدد با همین فایل صوتی» را بزن.");
+      info("تبدیل فایل کامل ناموفق بود: "+error.message);
     }else{
-      reviewDraft("تبدیل صدا ناموفق بود؛ فایل ضبط‌شده را از پخش‌کننده بشنو و پاسخ را تایپ کن. هنوز چیزی ارسال نشده است.");
+      reviewDraft("تبدیل صدا ناموفق بود: "+error.message+" فایل صوتی همچنان در مرورگر قابل پخش است. می‌توانی دوباره با همان فایل تلاش کنی یا پاسخ را تایپ کنی. هنوز چیزی به AI ارسال نشده است.");
       info("تبدیل صدا ناموفق بود: "+error.message);
     }
   }finally{
     transcribing=false;$("send-text").disabled=false;$("finish").disabled=false;
     $("hold-to-talk").disabled=!aiStarted||needsPersianRepair()||aiBusy;
+    $("retry-voice").disabled=false;
   }
 }
+$("retry-voice").addEventListener("click",()=>{
+  if(!lastAudioBlob||holding||releasePending||transcribing||aiBusy)return;
+  releasePending=true;
+  void sendFullRecording(lastAudioBlob);
+});
 async function startFullRecording(){
   const Recorder=window.MediaRecorder;
   let live;
@@ -464,6 +479,7 @@ function stop() {
   if(mediaRecorder&&mediaRecorder.state!=="inactive")try{mediaRecorder.stop();}catch{}
   clearRecordingMedia();
   stopQuestionAudio();
+  lastAudioBlob=null;$("retry-voice").hidden=true;
   if(recordedAudioURL&&typeof URL!=="undefined")URL.revokeObjectURL(recordedAudioURL);
   recordedAudioURL=null;$("recorded-audio").hidden=true;
   if(rtc){rtc.close();rtc=null;}
