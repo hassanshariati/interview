@@ -1,4 +1,4 @@
-name: One-shot production deployment trigger
+name: One-shot production queue repair
 
 on:
   push:
@@ -12,16 +12,16 @@ permissions:
 
 jobs:
   dispatch:
-    name: Dispatch existing production deployment
+    name: Release stuck production deployment queue
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Trigger approved workflow on main
+      - name: Cancel obsolete runner-label deployment
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: hassanshariati/interview
         run: |
           set -euo pipefail
-          gh workflow run deploy.yml --ref main --repo "$GH_REPO"
+          gh run cancel 41785710417 --repo "$GH_REPO"
 
 # Retry after aligning the production runner labels with registered self-hosted runner.
