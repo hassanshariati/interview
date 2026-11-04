@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException
+from .persian import PERSIAN_QUESTION_RULE
 
 
 def configured() -> bool:
@@ -36,7 +37,7 @@ async def generate_question(instructions: str, prior_turns: list[dict],
                             latest_answer: str | None) -> str:
     key, model, base = deepseek_config()
     messages = [
-        {"role": "system", "content": instructions + "\nAsk exactly ONE concise, practical interview question in the candidate's language. No scoring or hiring recommendation."}
+        {"role": "system", "content": PERSIAN_QUESTION_RULE + "\n" + instructions + "\nAsk exactly ONE practical question in Persian. No scoring or hiring recommendation."}
     ]
     for turn in prior_turns[-18:]:
         if turn.get("source") not in ("server_llm", "candidate_ai"):
@@ -46,7 +47,7 @@ async def generate_question(instructions: str, prior_turns: list[dict],
     if latest_answer is not None:
         messages.append({"role": "user", "content": latest_answer[:2000]})
     else:
-        messages.append({"role": "user", "content": "Begin the interview now with one useful technical question based on my CV and target job."})
+        messages.append({"role": "user", "content": "با سلام مصاحبه را شروع کن و یک سؤال فنی کاربردی درباره رزومه و شغل به فارسی بپرس."})
     payload = {"model": model, "messages": messages, "max_tokens": 330,
                "thinking": {"type": "disabled"}, "stream": False}
     try:
