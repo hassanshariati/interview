@@ -724,7 +724,7 @@ async def candidate_transcribe_audio(token: str = Form(..., min_length=30, max_l
     audio_hourly_limit(db, inv, "audio.transcription", 25)
     if not any(e.get("source") == "server_llm" for e in (inv.transcript or [])):
         raise HTTPException(409, "ابتدا سؤال اول مصاحبه را دریافت کن.")
-    limit = 12 * 1024 * 1024
+    limit = 8 * 1024 * 1024
     audio = bytearray()
     try:
         while True:
