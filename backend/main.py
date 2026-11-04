@@ -20,6 +20,7 @@ from .cv_parser import MAX_BYTES, clean_text, parse_cv
 from .interview_context import build_interview_instructions
 from .db import Base, engine, get_db
 from .emailer import send_email
+from .deepseek import configured as deepseek_configured, generate_question
 from .matching import classify, match_job
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -33,7 +34,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Interview AI", version="0.3.2", lifespan=lifespan)
+app = FastAPI(title="Interview AI", version="0.4.0", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 
 
@@ -101,6 +102,10 @@ class TranscriptIn(TokenIn):
     text: str = Field(min_length=1, max_length=2000)
 
 
+class AITurnIn(TokenIn):
+    text: str | None = Field(default=None, min_length=1, max_length=2000)
+
+
 def audit(db, user_id, action, resource):
     db.add(models.AuditEvent(user_id=user_id, action=action, resource=resource, created_at=now()))
 
@@ -131,7 +136,7 @@ def candidate_page():
 
 @app.get("/api/v1/health")
 def health():
-    return {"status": "ok", "version": "0.3.2"}
+    return {"status": "ok", "version": "0.4.0"}
 
 
 @app.post("/api/v1/auth/login")
@@ -480,11 +485,18 @@ def public_lookup(payload: TokenIn, db: Session = Depends(get_db)):
     inv = get_invitation(db, payload.token)
     c, job = db.get(models.Candidate, inv.candidate_id), db.get(models.Job, inv.job_id)
     evidence = match_job(c.cv_text or "", job.required_skills or [])
+    deepseek_mode = os.getenv("LLM_PROVIDER", "").strip().lower() == "deepseek"
+    prior_ai = [entry for entry in (inv.transcript or [])
+                if entry.get("source") in ("server_llm", "candidate_ai")] if inv.consent_at else []
     return {"job": job.title, "candidate": c.full_name, "slots": inv.slots, "selected_slot": inv.selected_slot,
             "status": inv.status, "consent": bool(inv.consent_at),
             "cv_received": bool(c.cv_text),
             "cv_skill_mentions": [item["skill"] for item in evidence["mentioned_skills"]][:8],
-            "voice_enabled": bool(os.getenv("OPENAI_API_KEY", "").strip()) and
+            "ai_provider": "deepseek" if deepseek_mode else "openai",
+            "ai_enabled": deepseek_configured() if deepseek_mode else False,
+            "ai_messages": [{"role": entry["role"], "text": entry["text"]}
+                            for entry in prior_ai[-24:]],
+            "voice_enabled": not deepseek_mode and bool(os.getenv("OPENAI_API_KEY", "").strip()) and
                              os.getenv("ENABLE_REALTIME", "false").lower() == "true"}
 
 
@@ -570,6 +582,62 @@ async def candidate_voice(payload: TokenIn, db: Session = Depends(get_db)):
     inv.voice_sessions += 1
     db.commit()
     return secret
+
+
+@app.post("/api/v1/public/invitation/ai-turn")
+async def candidate_ai_turn(payload: AITurnIn, db: Session = Depends(get_db)):
+    """Bounded, authenticated interview turn; no API key or unredacted CV reaches the browser."""
+    if not deepseek_configured():
+        raise HTTPException(503, "DeepSeek is not configured on this server")
+    invitation = db.scalar(select(models.Invitation).where(
+        models.Invitation.token_digest == digest(payload.token)).with_for_update())
+    if not invitation or invitation.expires_at < now():
+        raise HTTPException(404, "Interview link not found or expired")
+    if invitation.status != "confirmed" or not invitation.consent_at:
+        raise HTTPException(403, "Confirm the interview and agree to AI processing first")
+    if not invitation.selected_slot:
+        raise HTTPException(403, "Interview time not confirmed")
+    selected = datetime.fromisoformat(invitation.selected_slot).astimezone(timezone.utc)
+    current = datetime.now(timezone.utc)
+    if not (selected - timedelta(minutes=30) <= current <= selected + timedelta(hours=2)):
+        raise HTTPException(403, "Interview is outside the scheduled time window")
+
+    transcript = list(invitation.transcript or [])
+    ai_questions = [x for x in transcript if x.get("source") == "server_llm"]
+    answer = payload.text.strip() if payload.text else None
+    if not ai_questions and answer:
+        raise HTTPException(409, "Start the AI interview before submitting an answer")
+    if ai_questions and not answer:
+        last_question = ai_questions[-1]
+        return {"question": last_question["text"], "turn_count": len(ai_questions),
+                "already_started": True}
+    max_questions = max(2, min(15, int(os.getenv("AI_QUESTIONS_PER_INTERVIEW", "10"))))
+    if len(ai_questions) >= max_questions:
+        raise HTTPException(429, "Interview question limit reached; finish and submit your interview")
+    if len(transcript) >= 120:
+        raise HTTPException(429, "Interview transcript limit reached")
+    hourly_cap = max(1, min(500, int(os.getenv("AI_QUESTIONS_PER_HOUR", "80"))))
+    count = db.scalars(select(models.AuditEvent.id).where(
+        models.AuditEvent.action == "ai.deepseek_turn",
+        models.AuditEvent.created_at >= now() - 3600).limit(hourly_cap)).all()
+    if len(count) >= hourly_cap:
+        raise HTTPException(429, "AI service capacity reached; please retry later")
+
+    job = db.get(models.Job, invitation.job_id)
+    candidate = db.get(models.Candidate, invitation.candidate_id)
+    instructions = build_interview_instructions(job, candidate)
+    question = await generate_question(instructions, transcript, answer)
+    stamped = now()
+    if answer:
+        transcript.append({"role": "candidate", "source": "candidate_ai",
+                           "text": answer, "saved_at": stamped})
+    transcript.append({"role": "interviewer", "source": "server_llm",
+                       "text": question, "saved_at": stamped})
+    invitation.transcript = transcript
+    audit(db, None, "ai.deepseek_turn", str(invitation.id))
+    db.commit()
+    return {"question": question, "turn_count": len(ai_questions) + 1,
+            "already_started": False}
 
 
 @app.post("/api/v1/public/invitation/transcript")
