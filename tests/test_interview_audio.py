@@ -4,6 +4,7 @@ import os
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+import pytest
 
 import httpx
 from fastapi.testclient import TestClient
@@ -110,15 +111,20 @@ def test_gapgpt_audio_adapter_receives_full_file_without_leaking_credentials():
         "LLM_PROVIDER": "gapgpt", "GAPGPT_API_KEY": "test-private-secret",
         "GAPGPT_BASE_URL": "https://api.gapgpt.app/v1",
         "GAPGPT_STT_MODEL": "whisper-1"
-    }), patch.object(audio.httpx, "AsyncClient", FakeClient):
+    }), patch.object(audio.httpx, "AsyncClient", FakeClient), \
+            patch.object(audio, "normalize_browser_audio", new_callable=AsyncMock) as normalize:
+        normalize.return_value=b"CANONICAL_MP3_AUDIO" * 100
         clip=b"x" * 6000
         result=asyncio.run(audio.gapgpt_transcribe_audio(clip,"audio/webm;codecs=opus"))
     assert "Kubernetes" in result
     assert seen["url"] == "https://api.gapgpt.app/v1/audio/transcriptions"
     assert seen["authorization"] == "Bearer test-private-secret"
     assert b"whisper-1" in seen["body"]
-    assert b"answer.webm" in seen["body"]
-    assert clip in seen["body"]
+    assert b"answer.mp3" in seen["body"]
+    assert b"audio/mpeg" in seen["body"]
+    assert normalize.await_args.args == (clip, "audio/webm;codecs=opus")
+    assert b"CANONICAL_MP3_AUDIO" in seen["body"]
+    assert clip not in seen["body"]
     assert b"test-private-secret" not in seen["body"]
 
 
@@ -208,12 +214,15 @@ def test_stt_retries_one_transient_provider_502_and_succeeds():
         "LLM_PROVIDER": "gapgpt", "GAPGPT_API_KEY": "synthetic-secret",
         "GAPGPT_BASE_URL": "https://api.gapgpt.app/v1",
         "GAPGPT_STT_MODEL": "whisper-1", "GAPGPT_STT_MAX_ATTEMPTS": "2",
-    }), patch.object(audio.httpx, "AsyncClient", Client):
+    }), patch.object(audio.httpx, "AsyncClient", Client), \
+            patch.object(audio, "normalize_browser_audio", new_callable=AsyncMock) as normalize:
+        normalize.return_value=b"NORMALIZED_MP3_AUDIO" * 100
         result = asyncio.run(audio.gapgpt_transcribe_audio(b"fake audio bytes" * 300, "audio/webm"))
     assert "Kubernetes" in result
     assert len(calls) == 2
     assert all(call["url"].endswith("/audio/transcriptions") for call in calls)
-    assert all(b"fake audio bytes" in call["content"] for call in calls)
+    assert all(b"NORMALIZED_MP3_AUDIO" in call["content"] for call in calls)
+    assert normalize.await_count == 1  # Only decode once, even when provider retries.
     assert all(b"synthetic-secret" not in call["content"] for call in calls)
 
 
@@ -240,7 +249,9 @@ def test_stt_reports_provider_error_without_repeating_invalid_audio():
     with patch.dict(os.environ, {
         "LLM_PROVIDER": "gapgpt", "GAPGPT_API_KEY": "synthetic-secret",
         "GAPGPT_STT_MAX_ATTEMPTS": "2",
-    }), patch.object(audio.httpx, "AsyncClient", Client):
+    }), patch.object(audio.httpx, "AsyncClient", Client), \
+            patch.object(audio, "normalize_browser_audio", new_callable=AsyncMock) as normalize:
+        normalize.return_value=b"CANONICAL_MP3_AUDIO" * 100
         try:
             asyncio.run(audio.gapgpt_transcribe_audio(b"x" * 3000, "audio/webm"))
             assert False, "Bad audio must be rejected"
@@ -273,7 +284,9 @@ def test_stt_reports_persistent_502_without_revealing_raw_upstream_response():
     with patch.dict(os.environ, {
         "LLM_PROVIDER": "gapgpt", "GAPGPT_API_KEY": "synthetic-secret",
         "GAPGPT_STT_MAX_ATTEMPTS": "2",
-    }), patch.object(audio.httpx, "AsyncClient", Client):
+    }), patch.object(audio.httpx, "AsyncClient", Client), \
+            patch.object(audio, "normalize_browser_audio", new_callable=AsyncMock) as normalize:
+        normalize.return_value=b"CANONICAL_MP3_AUDIO" * 100
         try:
             asyncio.run(audio.gapgpt_transcribe_audio(b"x" * 3000, "audio/webm"))
             assert False, "A failed upstream must not be reported as success"
@@ -282,3 +295,59 @@ def test_stt_reports_persistent_502_without_revealing_raw_upstream_response():
             assert "502" in exc.detail
             assert "private provider diagnostics" not in exc.detail
     assert len(hits) == 2
+
+
+def test_normalizer_rejects_unsupported_media_and_bounded_input():
+    import backend.interview_audio as audio
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(audio.normalize_browser_audio(b"x" * 3000, "text/plain"))
+    assert exc.value.status_code == 422
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(audio.normalize_browser_audio(b"x" * (8 * 1024 * 1024 + 1), "audio/webm"))
+    assert exc.value.status_code == 413
+
+
+def test_normalizer_uses_safe_argument_array_and_mp3_stdout_only():
+    import backend.interview_audio as audio
+    from unittest.mock import AsyncMock
+    calls = {}
+    class FakeProcess:
+        returncode = 0
+        async def communicate(self, given):
+            calls["input"] = given
+            return b"ID3" + b"data"*500, b"private ffmpeg stderr"
+    async def fake_subprocess(*args, **kwargs):
+        calls["command"] = args
+        return FakeProcess()
+    with patch.object(audio.asyncio, "create_subprocess_exec", new=fake_subprocess):
+        converted=asyncio.run(audio.normalize_browser_audio(b"WEBM_AUDIO_DATA"*1000, "audio/webm;codecs=opus"))
+    assert converted.startswith(b"ID3")
+    assert "pipe:0" in calls["command"] and "pipe:1" in calls["command"]
+    assert "-f" in calls["command"] and "mp3" in calls["command"]
+    assert "-ac" in calls["command"] and "16000" in calls["command"]
+    assert calls["input"].startswith(b"WEBM_AUDIO_DATA")
+
+
+def test_real_ffmpeg_converts_a_synthetic_webm_opus_file():
+    import shutil
+    import subprocess
+    import math
+    import struct
+    import wave
+    import io
+    import backend.interview_audio as audio
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg integration covered by production container smoke test")
+    wav=io.BytesIO()
+    with wave.open(wav, "wb") as f:
+        f.setnchannels(1);f.setsampwidth(2);f.setframerate(16000)
+        frames=b"".join(struct.pack("<h",int(3500*math.sin(2*math.pi*420*i/16000)))
+                        for i in range(16000))
+        f.writeframes(frames)
+    process=subprocess.run(["ffmpeg","-hide_banner","-loglevel","error","-f","wav",
+                            "-i","pipe:0","-c:a","libopus","-f","webm","pipe:1"],
+                           input=wav.getvalue(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                           timeout=12,check=True)
+    data=asyncio.run(audio.normalize_browser_audio(process.stdout,"audio/webm;codecs=opus"))
+    assert data.startswith(b"ID3")
+    assert len(data)>1024

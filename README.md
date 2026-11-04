@@ -395,3 +395,24 @@ page is closed or refreshed. Saving the audio locally before reloading the
 page is the safest way to preserve a failed response. A persistent HTTP 502
 means the upstream speech provider or gateway needs further investigation
 or replacement; retries cannot guarantee recovery.
+
+
+## Browser WebM to MP3 normalization (v0.5.4)
+
+Before calling GapGPT's `whisper-1` transcription route, the API
+normalizes consented browser recordings (WebM/Opus, Ogg, MP4, or WAV)
+to mono 16 kHz 48-kbps **MP3**, using FFmpeg in the non-root API
+container. This is necessary because a gateway may reject a browser's
+WebM container even though it accepts a standard MP3. A synthetically
+generated MP3 was previously confirmed to work for the configured
+account. Actual interview recordings are never committed, logged or
+stored to disk by the converter; input/output are streamed through pipes
+and are discarded after transcription. The candidate reviews the
+generated text before it is sent to the interviewer.
+
+For safety, audio input is capped at 8 MiB, conversion at 24 seconds
+and 190 seconds of audio, and generated MP3 at 8 MiB. Decode errors
+are reported without exposing raw FFmpeg stderr. Persistent upstream
+400 errors after normalization indicate a different provider/model/file
+issue; consult the server-side status categories without logging private
+audio or provider response bodies. No changes to `.env` are needed.
