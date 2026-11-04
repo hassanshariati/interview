@@ -3,6 +3,8 @@ const token=decodeURIComponent(location.hash.slice(1));
 const $=id=>document.getElementById(id);
 let rtc=null,stream=null,recognition=null,known=new Set(),savedSomething=false;
 let aiProvider="openai",aiStarted=false,aiHistory=[],aiBusy=false,hasTranscript=false;
+const isChatProvider=()=>["deepseek","gapgpt"].includes(aiProvider);
+const aiName=()=>aiProvider==="gapgpt"?"GapGPT":"DeepSeek";
 const Recognition=window.SpeechRecognition||window.webkitSpeechRecognition;
 const canSpeak=typeof window.speechSynthesis!=="undefined"&&typeof window.SpeechSynthesisUtterance==="function";
 const addText=(line)=>{
@@ -28,7 +30,7 @@ function showHistory(items) {
     addText((item.role==="candidate"?"داوطلب: ":"مصاحبه‌گر AI: ")+item.text);
   if(!items.length)$("messages").textContent="بعد از شروع مصاحبه، سؤال‌ها و جواب‌ها اینجا نمایش داده می‌شوند.";
   aiStarted=items.some(item=>item.role==="interviewer");
-  $("start").textContent=aiStarted?"🎙 ضبط پاسخ صوتی":"شروع مصاحبه با DeepSeek";
+  $("start").textContent=aiStarted?"🎙 ضبط پاسخ صوتی":"شروع مصاحبه با "+aiName();
 }
 function speaking(text) {
   if(!canSpeak){info("متن سؤال نمایش داده شد؛ این مرورگر تبدیل متن به صدا ندارد.");return;}
@@ -56,7 +58,7 @@ async function askAI(text=null) {
     $("manual").value="";
     info("سؤال "+Number(result.turn_count).toLocaleString("fa-IR")+" آماده است. جواب را بگو یا بنویس.");
     speaking(result.question);
-  }catch(err){info(err.message||"اتصال به DeepSeek برقرار نشد.");}
+  }catch(err){info(err.message||"اتصال به سرویس هوش مصنوعی برقرار نشد.");}
   finally{aiBusy=false;$("start").disabled=false;$("send-text").disabled=false;}
 }
 function listen() {
@@ -72,7 +74,7 @@ function listen() {
       const answer=Array.from(e.results).map(result=>result[0]?.transcript||"").join(" ").trim();
       if(!answer)return;
       $("manual").value=answer;
-      info("پاسخ شنیده شد. در حال ارسال به DeepSeek…");
+      info("پاسخ شنیده شد. در حال ارسال به "+aiName()+"…");
       askAI(answer);
     };
     current.onerror=e=>info("خطای تشخیص صدا: "+(e.error||"نامشخص")+". می‌توانی پاسخ را تایپ کنی.");
@@ -105,15 +107,15 @@ async function refresh() {
       status("جلسه آماده است · "+new Date(inv.selected_slot).toLocaleString("fa-IR",{dateStyle:"short",timeStyle:"short"}));
     }
     $("consent").checked=inv.consent;
-    const deepseek=aiProvider==="deepseek";
+    const deepseek=isChatProvider();
     $("speech-tools").hidden=!deepseek;
     $("send-text").textContent=deepseek?"ارسال پاسخ و دریافت سؤال بعدی":"ثبت پاسخ متنی";
     $("start").disabled=deepseek?!inv.ai_enabled:!inv.voice_enabled;
     if(deepseek){
       showHistory(inv.ai_messages||[]);
       info(inv.ai_enabled?
-        (Recognition?"DeepSeek متصل است. برای شروع مصاحبه کلیک کن؛ می‌توانی با میکروفون یا متن جواب بدهی.":"DeepSeek متصل است؛ تشخیص گفتار در این مرورگر پشتیبانی نمی‌شود، اما مصاحبه متنی فعال است."):
-        "کلید DeepSeek در سرور تنظیم نشده است یا مقدار آن نمونه است.");
+        (Recognition?aiName()+" برای مصاحبه آماده است. می‌توانی با میکروفون یا متن جواب بدهی.":aiName()+" برای مصاحبه متنی آماده است؛ تشخیص صدا در این مرورگر پشتیبانی نمی‌شود."):
+        "کلید "+aiName()+" در سرور تنظیم نشده است یا مقدار آن نمونه است.");
     }else{
       $("start").textContent="🎙 شروع گفت‌وگو با AI";
       if(!inv.voice_enabled)info("مصاحبه صوتی OpenAI روی سرور فعال نیست؛ ثبت متن دستی به‌تنهایی مصاحبه AI نیست.");
@@ -138,7 +140,7 @@ async function save(role,text) {
 }
 $("send-text").addEventListener("click",async()=>{
   if(!$("consent").checked){status("ابتدا رضایت را ثبت کن.");return;}
-  if(aiProvider==="deepseek"){await askAI($("manual").value);return;}
+  if(isChatProvider()){await askAI($("manual").value);return;}
   try{await save("candidate",$("manual").value);$("manual").value="";}
   catch(error){status(error.message);}
 });
@@ -152,7 +154,7 @@ function stop() {
 $("stop").addEventListener("click",()=>{stop();info("میکروفون و پخش صدا متوقف شد.");});
 $("start").addEventListener("click",async()=>{
   if(!$("consent").checked){status("ابتدا با پردازش صدا و متن موافقت کن.");return;}
-  if(aiProvider==="deepseek"){
+  if(isChatProvider()){
     if(!aiStarted)await askAI();
     else listen();
     return;
