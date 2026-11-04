@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Interview AI", version="0.5.1", lifespan=lifespan)
+app = FastAPI(title="Interview AI", version="0.5.2", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 
 
@@ -186,7 +186,7 @@ def candidate_page():
 
 @app.get("/api/v1/health")
 def health():
-    return {"status": "ok", "version": "0.5.1"}
+    return {"status": "ok", "version": "0.5.2"}
 
 
 @app.post("/api/v1/auth/login")

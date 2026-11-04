@@ -140,3 +140,38 @@ def test_persian_voice_produces_audio_without_browser_voice_installation():
     assert called["voice"] == "fa-IR-DilaraNeural"
     assert called["rate"] == "-6%"
     assert called["text"].startswith("سلام!")
+
+
+def test_candidate_can_submit_untruncated_long_transcript_after_review():
+    """A reviewed Persian answer above 2000 characters reaches the LLM and DB intact."""
+    with patch.dict(os.environ, {
+        "LLM_PROVIDER": "gapgpt", "GAPGPT_API_KEY": "synthetic-test-only",
+    }):
+        with TestClient(app) as client:
+            token = _candidate(client, "long-verified-voice")
+            assert client.post("/api/v1/public/invitation/consent",
+                json={"token": token, "accepted": True}).status_code == 200
+            with SessionLocal() as db:
+                inv = db.scalar(select(models.Invitation).where(
+                    models.Invitation.token_digest == digest(token)))
+                inv.transcript = [{
+                    "role": "interviewer", "source": "server_llm",
+                    "text": "سلام! در پروژه Kubernetes چه وظایفی داشتی؟"
+                }]
+                inv_id = inv.id
+                db.commit()
+            answer = ("برای عیب‌یابی کلاستر ابتدا وضعیت نودها و لاگ‌ها را بررسی کردم. " * 55).strip()
+            assert 2000 < len(answer) <= 6500
+            with patch("backend.main.generate_persian_question",
+                       new_callable=AsyncMock) as mock:
+                mock.return_value = "سلام! پس از رفع خطا چطور نتیجه را آزمایش کردی؟"
+                result = client.post("/api/v1/public/invitation/ai-turn",
+                                     json={"token": token, "text": answer})
+                assert result.status_code == 200, result.text
+                assert mock.await_args.args[2] == answer
+            with SessionLocal() as db:
+                inv = db.get(models.Invitation, inv_id)
+                recorded = [event for event in inv.transcript
+                            if event.get("source") == "candidate_ai"]
+                assert len(recorded) == 1
+                assert recorded[0]["text"] == answer

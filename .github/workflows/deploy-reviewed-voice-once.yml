@@ -1,0 +1,24 @@
+name: One-shot reviewed voice answers release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/deploy-reviewed-voice-once.yml"
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch tested production workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: hassanshariati/interview
+        run: |
+          set -euo pipefail
+          gh workflow run deploy.yml --ref main --repo "$GH_REPO"

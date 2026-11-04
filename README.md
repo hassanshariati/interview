@@ -347,3 +347,28 @@ The default reverse proxy has a 10 MiB request ceiling; the voice endpoint
 limits audio to 8 MiB. Avoid exposing private invitation tokens, audio or
 transcripts in logs. Always check actual Arabic/Persian speech output and
 ASR on desktop/mobile browsers with fake applicant data before real use.
+
+
+## Speech recognition: confirm before sending (v0.5.2)
+
+In a GapGPT-based spoken interview, the browser records the full clip until
+the candidate releases **hold to speak** and posts the clip for transcription.
+The resulting Persian text is shown in an editable textarea **as a draft**.
+It is **not** automatically submitted to the interview LLM. The candidate
+may replay the recorded clip, complete missing words, or correct the text;
+only pressing **تأیید و ارسال پاسخ کامل** sends that final answer and prompts
+the follow-up question. On transcription errors, the audio preview remains
+available and the candidate may type an answer.
+
+Browser SpeechRecognition is intentionally not run simultaneously with a
+MediaRecorder recording, avoiding conflicting microphone use and partial
+browser transcripts overwriting the final STT result. Where only browser
+speech recognition is available, output is labelled as an unverified draft
+and needs the same explicit confirmation.
+
+Long text answers can contain up to 6,500 characters through the complete
+backend and selected text provider request; no silent truncation to 2,000
+characters. The browser will flag suspiciously short text in relation to
+recording duration, but this is a diagnostic cue, **not a reliable accuracy
+assessment**. Neither raw audio nor automatic candidate evaluations are
+stored from the transcription request itself.

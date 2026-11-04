@@ -6,6 +6,7 @@ let holding=false,releasePending=false,releaseTimer=null,voiceSegments=[],draftB
 let voiceFinalizeCalled=false;
 let audioTranscriptionAvailable=false,persianAudioAvailable=false;
 let holdMode="",mediaRecorder=null,recordingStream=null,mediaChunks=[],maxRecordingTimer=null;
+let recordingStartedAt=0,lastRecordingSeconds=0;
 let questionAudioURL=null,recordedAudioURL=null,playbackVersion=0,transcribing=false;
 let aiProvider="openai",aiStarted=false,aiHistory=[],aiBusy=false,hasTranscript=false;
 const isChatProvider=()=>["deepseek","gapgpt"].includes(aiProvider);
@@ -120,7 +121,8 @@ async function askAI(text=null) {
     }
     showHistory(aiHistory);
     $("manual").value="";
-    info("سؤال "+Number(result.turn_count).toLocaleString("fa-IR")+" آماده است. جواب را بگو یا بنویس.");
+    clearReviewDraft();
+    info("سؤال "+Number(result.turn_count).toLocaleString("fa-IR")+" آماده است. پاسخ را کامل بگو یا بنویس.");
     void speaking(result.question);
   }catch(err){info(err.message||"اتصال به سرویس هوش مصنوعی برقرار نشد.");}
   finally{
@@ -137,6 +139,19 @@ function setHoldState(active){
 function voiceText(parts){
   return parts.map(s=>String(s).trim()).filter(Boolean).join(" ").trim();
 }
+function reviewDraft(message){
+  $("answer-review").hidden=false;
+  $("answer-review").textContent=message;
+  $("send-text").textContent="تأیید و ارسال پاسخ کامل";
+  const field=$("manual");
+  if(typeof field.scrollIntoView==="function")field.scrollIntoView({behavior:"smooth",block:"center"});
+  if(typeof field.focus==="function")field.focus({preventScroll:true});
+}
+function clearReviewDraft(){
+  $("answer-review").hidden=true;
+  $("answer-review").textContent="";
+  $("send-text").textContent="ارسال پاسخ و دریافت سؤال بعدی";
+}
 function finishBrowserTranscription(){
   if(!releasePending||voiceFinalizeCalled)return;
   voiceFinalizeCalled=true;releasePending=false;
@@ -146,9 +161,11 @@ function finishBrowserTranscription(){
   if(draft)$("manual").value=draft.slice(0,6500);
   // Browser recognition frequently returns only a few early words.
   // Never silently send its potentially incomplete text to the LLM.
-  info(text?"متن موقت مرورگر ثبت شد. آن را بررسی، با پاسخ کامل مقایسه و ویرایش و سپس «ارسال پاسخ» را بزن.":
+  if(text)reviewDraft("متن موقت تشخیص گفتار مرورگر ممکن است ناقص باشد؛ آن را بررسی و تکمیل کن. هیچ پاسخی هنوز به AI ارسال نشده است.");
+  info(text?"متن موقت مرورگر در کادر قرار گرفت؛ پیش از ادامه، کامل بودنش را تأیید کن.":
       "مرورگر گفتار قابل‌اعتمادی تشخیص نداد. پاسخ را تایپ کن.");
   $("hold-to-talk").disabled=false;
+  $("send-text").disabled=false;$("finish").disabled=false;
 }
 function startRecognitionSegment(){
   if(!holding||!Recognition)return;
@@ -200,8 +217,8 @@ function clearRecordingMedia(){
 async function sendFullRecording(blob){
   if(!releasePending)return;
   releasePending=false;
-  if(blob.size<1024){info("ضبط صدا خالی است؛ دوباره امتحان کن یا پاسخ را بنویس.");return;}
-  if(blob.size>8*1024*1024){info("حجم فایل صوتی بزرگ است. پاسخ را کوتاه‌تر ضبط کن یا بنویس.");return;}
+  if(blob.size<1024){info("ضبط صدا خالی است؛ دوباره امتحان کن یا پاسخ را بنویس.");$("send-text").disabled=false;$("finish").disabled=false;return;}
+  if(blob.size>8*1024*1024){info("حجم فایل صوتی بزرگ است. پاسخ را کوتاه‌تر ضبط کن یا بنویس.");$("send-text").disabled=false;$("finish").disabled=false;return;}
   if(recordedAudioURL&&typeof URL!=="undefined")URL.revokeObjectURL(recordedAudioURL);
   recordedAudioURL=URL.createObjectURL(blob);
   const player=$("recorded-audio");
@@ -227,16 +244,24 @@ async function sendFullRecording(blob){
       info("متن پاسخ بیش از حد طولانی است. آن را در کادر کوتاه کن و سپس ارسال کن.");
       return;
     }
-    info("صدای کامل پردازش شد؛ پاسخ به مصاحبه‌گر ارسال می‌شود…");
-    transcribing=false;
-    await askAI(answer);
+    const wordCount=transcript.split(/\s+/).filter(Boolean).length;
+    const seconds=Math.round(lastRecordingSeconds);
+    const warning=seconds>=20&&wordCount<20?
+      " ⚠️ متن نسبت به مدت ضبط بسیار کوتاه است؛ احتمال دارد بخشی از گفتار تشخیص داده نشده باشد. فایل صوتی را گوش کن و متن را تکمیل کن.":"";
+    const summary="مدت ضبط: "+seconds.toLocaleString("fa-IR")+" ثانیه · "+
+      wordCount.toLocaleString("fa-IR")+" واژه شناسایی شد.";
+    reviewDraft(summary+" "+warning+
+      " این یک پیش‌نویس است؛ با فایل ضبط‌شده مقایسه و اصلاح کن، سپس «تأیید و ارسال پاسخ کامل» را بزن.");
+    info("متن ضبط در کادر پاسخ آماده است. تا تأیید تو هیچ پاسخی به AI ارسال نمی‌شود.");
   }catch(error){
     const tentative=voiceText(voiceSegments);
     if(tentative){
       $("manual").value=[draftBeforeVoice,tentative].filter(Boolean).join(" ").trim().slice(0,6500);
-      info("تبدیل فایل کامل ناموفق بود: "+error.message+"؛ متن موقت مرورگر را بررسی و تکمیل کن و سپس ارسال کن. فایل ضبط‌شده هم قابل پخش است.");
+      reviewDraft("تبدیل فایل کامل ناموفق بود. متن موقت ممکن است ناقص باشد؛ فایل ضبط‌شده را گوش کن، پاسخ را کامل کن و بعد ارسال کن.");
+      info("تبدیل فایل کامل ناموفق بود: "+error.message+"؛ متن جایگزین را بررسی کن.");
     }else{
-      info("تبدیل صدا ناموفق بود: "+error.message+"؛ صدای ضبط‌شده قابل پخش است. پاسخ را دستی بنویس و ارسال کن.");
+      reviewDraft("تبدیل صدا ناموفق بود؛ فایل ضبط‌شده را از پخش‌کننده بشنو و پاسخ را تایپ کن. هنوز چیزی ارسال نشده است.");
+      info("تبدیل صدا ناموفق بود: "+error.message);
     }
   }finally{
     transcribing=false;$("send-text").disabled=false;$("finish").disabled=false;
@@ -252,7 +277,9 @@ async function startFullRecording(){
     });
     if(!holding){
       live.getTracks().forEach(track=>track.stop());
-      releasePending=false;info("برای ضبط، دکمه را تا بعد از فعال‌شدن میکروفون نگه دار.");
+      releasePending=false;
+      $("send-text").disabled=false;$("finish").disabled=false;
+      info("برای ضبط، دکمه را تا بعد از فعال‌شدن میکروفون نگه دار.");
       return;
     }
     recordingStream=live;
@@ -269,7 +296,10 @@ async function startFullRecording(){
       if(releasePending)void sendFullRecording(blob);
     };
     current.start(1000);
-    if(Recognition)startRecognitionSegment(); // best-effort live preview/backup only
+    recordingStartedAt=Date.now();
+    // Never run SpeechRecognition in parallel with MediaRecorder:
+    // partial browser results can overwrite the full-clip transcript,
+    // and browsers can stop listening after a few words.
     info("تمام صدای پاسخ در حال ضبط است. تا پایان صحبت دکمه را نگه دار (حداکثر ۳ دقیقه).");
     maxRecordingTimer=setTimeout(()=>{
       if(holding){info("حداکثر سه دقیقه ضبط تکمیل شد. در حال ارسال صدای کامل…");releaseHolding(true);}
@@ -277,6 +307,7 @@ async function startFullRecording(){
   }catch{
     if(live)live.getTracks().forEach(track=>track.stop());
     clearRecordingMedia();holding=false;releasePending=false;setHoldState(false);
+    $("send-text").disabled=false;$("finish").disabled=false;
     info("مجوز میکروفون یا ضبط صدا فعال نشد. با مرورگر به‌روز Chrome یا Edge امتحان کن یا پاسخ را تایپ کن.");
   }
 }
@@ -290,6 +321,7 @@ function beginHolding(event){
   }
   stopQuestionAudio();
   holding=true;releasePending=false;voiceFinalizeCalled=false;voiceSegments=[];
+  $("send-text").disabled=true;$("finish").disabled=true;
   draftBeforeVoice=$("manual").value.trim();
   setHoldState(true);
   if(event?.pointerId!==undefined){
@@ -307,14 +339,18 @@ function releaseHolding(send=true){
   holding=false;releasePending=send;setHoldState(false);
   if(holdMode==="media"){
     clearTimeout(maxRecordingTimer);maxRecordingTimer=null;
-    if(!send){releasePending=false;mediaChunks=[];}
+    if(recordingStartedAt)lastRecordingSeconds=(Date.now()-recordingStartedAt)/1000;
+    recordingStartedAt=0;
+    if(!send){releasePending=false;mediaChunks=[];$("send-text").disabled=false;$("finish").disabled=false;}
     if(recognition){
-      try{recognition.stop();}catch{/* ASR is only a preview while recording. */}
+      try{recognition.stop();}catch{/* Browser-only fallback cleanup. */}
     }
     if(mediaRecorder&&mediaRecorder.state!=="inactive"){
       try{mediaRecorder.stop();}catch{clearRecordingMedia();releasePending=false;}
     }else if(!recordingStream&&send){
-      releasePending=false;info("ضبط خیلی کوتاه بود؛ دوباره دکمه را نگه دار.");
+      releasePending=false;
+      $("send-text").disabled=false;$("finish").disabled=false;
+      info("ضبط خیلی کوتاه بود؛ دوباره دکمه را نگه دار.");
     }
     return;
   }
@@ -322,6 +358,7 @@ function releaseHolding(send=true){
     releasePending=false;voiceSegments=[];
     if(recognition){const current=recognition;recognition=null;current.abort();}
     clearTimeout(releaseTimer);releaseTimer=null;
+    $("send-text").disabled=false;$("finish").disabled=false;
     info("ضبط لغو شد. می‌توانی دوباره صحبت کنی.");
     return;
   }
@@ -411,6 +448,10 @@ async function save(role,text) {
   addText((role==="candidate"?"داوطلب: ":"مصاحبه‌گر: ")+text);
 }
 $("send-text").addEventListener("click",async()=>{
+  if(holding||releasePending||transcribing||aiBusy){
+    info("ابتدا ضبط یا تبدیل صدا را تمام کن؛ سپس متن کامل پاسخ را بررسی و ارسال کن.");
+    return;
+  }
   if(!$("consent").checked){status("ابتدا رضایت را ثبت کن.");return;}
   if(isChatProvider()){await askAI($("manual").value);return;}
   try{await save("candidate",$("manual").value);$("manual").value="";}
