@@ -42,7 +42,7 @@ vm.runInNewContext(source,{
   Intl,Number,JSON,String,Date,Promise,console,Error,
 });
 async function check() {
-  await Promise.resolve();
+  await new Promise(resolve=>setImmediate(resolve));
   assert.equal(typeof login.listeners.submit,"function");
   const event={currentTarget:login,preventDefault(){}};
   const running=login.listeners.submit(event);
