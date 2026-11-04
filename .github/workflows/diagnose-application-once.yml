@@ -60,3 +60,30 @@ jobs:
                   session.close()
                   outer.rollback()
           PY
+
+      - name: Summarize exceptions without applicant details
+        shell: bash
+        run: |
+          cd /opt/interview-ai
+          python3 - <<'PY'
+          import collections, re, subprocess
+          result = subprocess.run(["docker","compose","logs","--since","3h","--no-color","api"],
+                                  capture_output=True, text=True)
+          raw=result.stdout + result.stderr
+          lines=raw.splitlines()
+          markers=[(i,line) for i,line in enumerate(lines) if "Exception in ASGI application" in line]
+          print("ASGI_EXCEPTION_EVENTS="+str(len(markers)))
+          exceptions=collections.Counter()
+          frames=collections.Counter()
+          for i,_ in markers[-15:]:
+              snippet=lines[i+1:i+110]
+              for entry in snippet:
+                  m=re.search(r"File \"(/app/(?:backend|web)/[^\"]+)\", line (\d+), in ([a-zA-Z_][a-zA-Z0-9_]*)",entry)
+                  if m: frames[(m.group(1),m.group(2),m.group(3))]+=1
+                  m=re.search(r"(?:^|\s)([\w.]+(?:Error|Exception)):",entry)
+                  if m: exceptions[m.group(1)]+=1
+                  if "Exception in ASGI application" in entry:break
+          print("EXCEPTION_CLASSES="+str(exceptions))
+          print("BACKEND_TRACE_LOCATIONS="+str(frames))
+          print("LOG_CAPTURE_EXIT_CODE="+str(result.returncode))
+          PY
