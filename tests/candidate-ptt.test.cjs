@@ -157,7 +157,8 @@ test("browser-only short recognition is not silently sent as a complete answer",
   await flush();
   assert.equal(h.requests.filter(r=>r.url.endsWith("/ai-turn")).length,1);
   assert.ok(h.node("manual").value.includes("Kubernetes"));
-  assert.ok(h.node("rtc-status").textContent.includes("بررسی"));
+  assert.equal(h.node("answer-review").hidden,false);
+  assert.ok(h.node("answer-review").textContent.includes("ناقص"));
   await h.node("send-text").handlers.get("click")();
   await flush();
   assert.equal(h.requests.filter(r=>r.url.endsWith("/ai-turn")).length,2);
