@@ -244,7 +244,7 @@ async function sendFullRecording(blob){
       info("متن پاسخ بیش از حد طولانی است. آن را در کادر کوتاه کن و سپس ارسال کن.");
       return;
     }
-    const wordCount=transcript.split(/\\s+/).filter(Boolean).length;
+    const wordCount=transcript.split(/\s+/).filter(Boolean).length;
     const seconds=Math.round(lastRecordingSeconds);
     const warning=seconds>=20&&wordCount<20?
       " ⚠️ متن نسبت به مدت ضبط بسیار کوتاه است؛ احتمال دارد بخشی از گفتار تشخیص داده نشده باشد. فایل صوتی را گوش کن و متن را تکمیل کن.":"";
