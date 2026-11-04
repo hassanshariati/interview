@@ -10,7 +10,7 @@
 - **Baseline authentication**: Argon2id password hashes, admin/recruiter roles, initial admin bootstrap, signed-in `HttpOnly` browser session (8 hours), `Secure` + `SameSite=Strict` cookies, CSRF checks, per-account login lockout and per-process/IP throttling, password reset CLI. Optional HTTP **Basic Auth** for CLI requests over **HTTPS only**.
 - Admin user creation endpoint and audit records for critical recruiter actions.
 - Job creation, PDF/DOCX/TXT CV extraction and skill-keyword evidence (not automated candidate ranking/rejection).
-- SMTP STARTTLS candidate invitations with 1–5 proposed times, private tokenized booking page and confirmation email; times are stored in UTC and displayed in candidate's browser timezone.
+- n8n webhook (or direct SMTP STARTTLS) candidate invitations with 1–5 proposed times, private tokenized booking page and confirmation email; times are stored in UTC and displayed in candidate's browser timezone.
 - Role-specific browser voice interviewing via OpenAI Realtime WebRTC **when configured**. Short-lived voice secrets are minted server-side and candidate must explicitly consent. Session restricted to booked time window.
 - Optional browser-collected transcript snippets for **human review only** (unverified client provenance). Human-entered competency scores and JSON report; no automatic hiring decision.
 - Single Docker Compose stack: PostgreSQL, FastAPI and container Nginx, with only container Nginx exposed at `127.0.0.1:18080`. Optional Caddy profile for standalone HTTPS.
@@ -29,7 +29,7 @@
 - Ubuntu Linux with Docker Engine and Docker Compose plugin.
 - Nginx installed **on the host**, port 80 and 443 accessible.
 - `interview.armember.ir` DNS A record points to `94.184.27.131`.
-- Certbot installed, reachable outbound SMTP and OpenAI API as required.
+- Certbot installed, reachable outbound HTTPS to n8n and OpenAI API as required.
 - Sufficient disk space for PostgreSQL backup/restore. Allow SSH only to trusted administrators.
 
 ## 1. Deploy with one Docker Compose stack
@@ -53,7 +53,7 @@ If you are updating an existing checkout, run `git pull --ff-only` in `/opt/inte
 
 The generator prints the **initial admin password one time**. Save it in a password manager. The `.env` contains sensitive values and must never be added to Git.
 
-Edit `.env` to set `SMTP_HOST`, `SMTP_FROM`, `SMTP_USER`, `SMTP_PASSWORD` (the provider must support STARTTLS); to enable voice, also set `OPENAI_API_KEY` and `ENABLE_REALTIME=true`. The voice key always stays on the backend.
+Import the email workflow and configure `EMAIL_PROVIDER=n8n`, `N8N_EMAIL_WEBHOOK_URL`, `N8N_EMAIL_WEBHOOK_TOKEN`, and `SMTP_FROM` in `.env`; see [n8n email setup](docs/N8N_EMAIL.md). Mail credentials stay in n8n. Existing direct SMTP deployments remain supported with `EMAIL_PROVIDER=smtp`. To enable voice, also set `OPENAI_API_KEY` and `ENABLE_REALTIME=true`. The voice key always stays on the backend.
 
 ```bash
 ./scripts/deploy.sh
@@ -136,7 +136,7 @@ This command prompts for the password rather than placing it in shell history. D
 ## 4. Candidate workflow
 
 1. Admin uploads a synthetic CV, defines job competencies and selects the corresponding candidate/job.
-2. Admin proposes 1–5 times and creates an invite. When SMTP is correctly configured, a private link is sent to the candidate's email address.
+2. Admin proposes 1–5 times and creates an invite. When the email provider is correctly configured, a private link is sent to the candidate's email address.
 3. Candidate opens the link, confirms a time, reads consent information and starts voice interview within 30 minutes before to 2 hours after the selected time.
 4. The browser can upload transcript snippets; the report tags them as `candidate_browser_unverified` and requires human evaluation.
 5. Admin adds documented technical evaluation notes and reviews `/api/v1/reports/{candidate_id}/{job_id}`.
@@ -171,7 +171,7 @@ python3 -m pip install -r requirements.txt
 pytest -q
 ```
 
-Tests cover password/cookie session, CSRF, role/user creation, CV upload/matching, invitation, candidate flow, report and HTTP Basic access. End-to-end SMTP, live OpenAI, Nginx and Docker deploy must be smoke-tested with configured services.
+Tests cover password/cookie session, CSRF, role/user creation, CV upload/matching, invitation, candidate flow, report and HTTP Basic access. End-to-end n8n/SMTP, live OpenAI, Nginx and Docker deploy must be smoke-tested with configured services.
 
 ## Important policy
 
@@ -180,3 +180,7 @@ Evaluate job-related knowledge from questions and answers; **do not** derive hir
 ## GitHub repository
 
 Committed source: <https://github.com/hassanshariati/interview>. If GitHub app write access is unavailable, install this ZIP and push the source via authenticated Git on your trusted workstation (not by exposing passwords in chat). Check the connected GitHub app's **Contents: Read and write** permission.
+
+## Interface and browser access
+
+The admin login, dashboard, and candidate page share a responsive dark theme with a self-hosted B Yekan font, keyboard focus styles, and reduced-motion support. Login checks the browser session cookie before opening the dashboard. See [authentication troubleshooting](docs/AUTH_TROUBLESHOOTING.md) for HTTPS, origin, account lock and password-reset configuration.

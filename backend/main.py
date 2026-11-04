@@ -7,8 +7,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 import httpx
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, EmailStr, Field
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -31,6 +32,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Interview AI", version="0.2.0", lifespan=lifespan)
+app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 
 
 @app.middleware("http")
@@ -38,19 +40,26 @@ async def protect_requests(request: Request, call_next):
     if request.method in ("POST", "PUT", "PATCH", "DELETE"):
         origin = request.headers.get("origin")
         if origin and origin.rstrip("/") != APP_ORIGIN:
-            return Response("Origin not allowed", status_code=403)
+            return JSONResponse({"detail": "Origin not allowed"}, status_code=403)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["X-Frame-Options"] = "DENY"
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
+    elif request.url.path in ("/", "/candidate", "/candidate/"):
+        response.headers["Cache-Control"] = "no-cache"
     return response
 
 
 class LoginIn(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=512)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def normalize_email(cls, value):
+        return value.strip().lower() if isinstance(value, str) else value
 
 
 class UserIn(BaseModel):
@@ -301,7 +310,7 @@ def create_invitation(payload: InvitationIn, db: Session = Depends(get_db), user
         inv.email_status = "failed"
     db.commit()
     return {"id": inv.id, "status": inv.status, "email_status": inv.email_status,
-            "note": "No invitation link is returned by the API. Configure SMTP before inviting candidates."}
+            "note": "No invitation link is returned by the API. Configure the email provider before inviting candidates."}
 
 
 @app.get("/api/v1/invitations")

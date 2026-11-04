@@ -19,7 +19,7 @@ def main():
     if password != verify:
         raise SystemExit("Passwords do not match")
     with SessionLocal() as db:
-        user = db.scalar(select(models.User).where(models.User.email == args.email.lower()))
+        user = db.scalar(select(models.User).where(models.User.email == args.email.strip().lower()))
         if not user:
             raise SystemExit("User not found")
         user.password_hash = ph.hash(password)

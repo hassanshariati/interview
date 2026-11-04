@@ -102,3 +102,46 @@ def test_login_throttle_account_isolation():
     # Both accounts arrive from the same reverse proxy IP; neither should lock the other.
     login_rate_limit("172.16.0.10:bob@example.com")
     _ATTEMPTS.clear()
+
+
+def test_browser_login_normalization_session_rotation_and_expiry():
+    from backend.auth import _ATTEMPTS
+    _ATTEMPTS.clear()
+    credentials = {'email': '  ADMIN@EXAMPLE.COM  ', 'password': 'sufficiently-long-test-admin-password'}
+    with TestClient(app) as client:
+        first = client.post('/api/v1/auth/login', json=credentials)
+        assert first.status_code == 200
+        first_csrf = first.json()['csrf_token']
+        second = client.post('/api/v1/auth/login', json=credentials)
+        assert second.status_code == 200
+        assert second.json()['csrf_token'] != first_csrf
+        assert client.post('/api/v1/auth/logout', headers={'X-CSRF-Token': first_csrf}).status_code == 403
+        current = client.get('/api/v1/auth/me').json()
+        assert client.post('/api/v1/auth/logout', headers={'X-CSRF-Token': current['csrf_token']}).status_code == 200
+        assert client.get('/api/v1/auth/me').status_code == 401
+        blocked = client.post('/api/v1/auth/login', json=credentials, headers={'Origin': 'https://wrong.example'})
+        assert blocked.status_code == 403
+        assert blocked.json() == {'detail': 'Origin not allowed'}
+
+
+def test_secure_cookie_requires_https(monkeypatch):
+    monkeypatch.setenv('COOKIE_SECURE', 'true')
+    credentials = {'email': 'admin@example.com', 'password': 'sufficiently-long-test-admin-password'}
+    with TestClient(app) as client:
+        assert client.post('/api/v1/auth/login', json=credentials).status_code == 200
+        assert client.get('/api/v1/auth/me').status_code == 401
+    with TestClient(app, base_url='https://testserver') as client:
+        result = client.post('/api/v1/auth/login', json=credentials)
+        assert result.status_code == 200
+        assert 'secure' in result.headers['set-cookie'].lower()
+        assert client.get('/api/v1/auth/me').status_code == 200
+
+
+def test_theme_and_font_are_served():
+    with TestClient(app) as client:
+        assert '/assets/theme.css' in client.get('/').text
+        assert '/assets/theme.css' in client.get('/candidate/').text
+        assert client.get('/assets/theme.css').status_code == 200
+        font = client.get('/assets/fonts/BYekan.ttf')
+        assert font.status_code == 200 and len(font.content) > 10000
+        assert client.get('/assets/../../backend/auth.py').status_code == 404
