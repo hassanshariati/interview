@@ -28,4 +28,4 @@ jobs:
           node --check web/assets/portal.js
           node --check web/assets/admin.js
           node --check web/assets/candidate.js
-          node --test tests/admin-login.test.cjs
+          node --test tests/admin-login.test.cjs tests/candidate-ptt.test.cjs
