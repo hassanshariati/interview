@@ -553,6 +553,48 @@ def candidate_transcript(payload: TranscriptIn, db: Session = Depends(get_db)):
     return {"saved": True, "count": len(existing), "provenance": "candidate_browser_unverified"}
 
 
+
+def report_ready_notification(candidate, job, invitation):
+    """Best-effort manager alert without sending CV or browser-supplied transcript."""
+    payload = {
+        "event": "interview.finished",
+        "invitation_id": invitation.id,
+        "candidate_id": candidate.id,
+        "candidate_name": candidate.full_name,
+        "job_id": job.id,
+        "job_title": job.title,
+        "report_url": APP_ORIGIN + "/admin",
+        "review_required": True,
+    }
+    webhook = os.getenv("N8N_REPORT_WEBHOOK_URL", "").strip()
+    secret = os.getenv("N8N_REPORT_WEBHOOK_SECRET", "").strip()
+    if webhook:
+        # n8n should use header authentication and HTTPS with a private token.
+        if not webhook.startswith("https://") or len(secret) < 16:
+            return "not_configured"
+        try:
+            with httpx.Client(timeout=10, follow_redirects=False) as client:
+                result = client.post(webhook, json=payload,
+                                     headers={"Authorization": "Bearer " + secret})
+                result.raise_for_status()
+            return "sent"
+        except httpx.HTTPError:
+            return "failed"
+    manager_email = os.getenv("MANAGER_REPORT_EMAIL", "").strip()
+    if not manager_email:
+        return "not_configured"
+    try:
+        send_email(manager_email, "Interview awaiting human review — " + job.title,
+                   f"Interview completed: {candidate.full_name}\n"
+                   f"Job: {job.title}\n"
+                   f"Interview record: {invitation.id}\n"
+                   f"Review the evidence after signing in: {APP_ORIGIN}/admin\n"
+                   "This notice contains no audio or transcript. The interview is unscored until reviewed.")
+        return "sent"
+    except Exception:
+        return "failed"
+
+
 @app.post("/api/v1/public/invitation/finish")
 def candidate_finish(payload: TokenIn, db: Session = Depends(get_db)):
     inv = get_invitation(db, payload.token)
@@ -561,7 +603,11 @@ def candidate_finish(payload: TokenIn, db: Session = Depends(get_db)):
     inv.status = "finished"
     inv.finished_at = now()
     db.commit()
-    return {"finished": True, "note": "The interview is subject to human evaluation."}
+    candidate = db.get(models.Candidate, inv.candidate_id)
+    job = db.get(models.Job, inv.job_id)
+    delivery = report_ready_notification(candidate, job, inv)
+    return {"finished": True, "notification_status": delivery,
+            "note": "The interview is subject to human evaluation."}
 
 
 @app.post("/api/v1/realtime/client-secret")

@@ -169,3 +169,29 @@ def test_public_application_rate_limit_per_email():
         assert client.post("/api/v1/public/applications", data={
             "job_id": str(jr.json()["id"]), "full_name": "Rate Limit Test",
             "email": "rate-limit-test@example.com"}).status_code == 429
+
+
+def test_manager_email_notification_sent_on_finish():
+    with TestClient(app) as client:
+        login = client.post("/api/v1/auth/login", json={
+            "email": "admin@example.com", "password": "sufficiently-long-test-admin-password"})
+        headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+        job = client.post("/api/v1/jobs", headers=headers, json={
+            "title": "Security Analyst", "required_skills": ["Threat modeling"]}).json()
+        start = client.post("/api/v1/public/applications", data={
+            "job_id": str(job["id"]), "full_name": "Notification Candidate",
+            "email": "notify-candidate@example.com"})
+        assert start.status_code == 200, start.text
+        token = start.json()["interview_path"].split("#")[1]
+        assert client.post("/api/v1/public/invitation/consent",
+                           json={"token": token, "accepted": True}).status_code == 200
+        with patch.dict(os.environ, {"MANAGER_REPORT_EMAIL": "manager@example.com",
+                                     "N8N_REPORT_WEBHOOK_URL": ""}), patch("backend.main.send_email") as mocked:
+            finished = client.post("/api/v1/public/invitation/finish", json={"token": token})
+            assert finished.status_code == 200, finished.text
+            assert finished.json()["notification_status"] == "sent"
+            assert mocked.call_count == 1
+            args = mocked.call_args.args
+            assert args[0] == "manager@example.com"
+            assert "Notification Candidate" in args[2]
+            assert "transcript" not in args[2].lower()

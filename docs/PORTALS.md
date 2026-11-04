@@ -25,3 +25,13 @@ Existing invitation-based, scheduled interviews continue to function. The API pr
 7. Job categories are inferred for now; if staff need editable categories or vacancy state, add explicit model fields through an Alembic migration rather than calling SQLAlchemy \`create_all()\` on an already populated database.
 
 The design is an original Jobpply-inspired implementation, not a direct copy of Colorlib template assets. 
+
+## Manager notifications
+
+After the applicant finishes, the interview remains stored even if notification delivery fails. The server sends an alert containing IDs, applicant name, job title and the authenticated \`/admin\` page; it does **not** send transcripts or audio to the webhook or via email.
+
+- For n8n: set \`N8N_REPORT_WEBHOOK_URL\` to an HTTPS webhook endpoint and \`N8N_REPORT_WEBHOOK_SECRET\` to a strong, random 16+ character bearer token, and configure the n8n Webhook node to check the matching \`Authorization: Bearer ...\` header. Handle the alert in n8n and forward it to your management distribution list.
+- For basic SMTP fallback: leave the n8n URL unset and set \`MANAGER_REPORT_EMAIL\` plus the existing \`SMTP_*\` settings.
+- Both are optional: the finish endpoint's \`notification_status\` can be \`sent\`, \`failed\` or \`not_configured\`. Failure doesn't undo an interview. Reliable delivery with retries/outbox is future production work.
+
+The charted competency scores remain human-entered, not automatically inferred from voice.
