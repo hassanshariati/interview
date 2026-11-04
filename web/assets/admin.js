@@ -30,10 +30,10 @@ function fillSelect(id,items,label) {
 }
 function renderStats(data) {
   const stats=[
-    ["موقعیت شغلی فعال",data.counts.jobs,"فرصت منتشرشده"],
-    ["داوطلبان ثبت‌شده",data.counts.candidates,"پرونده موجود"],
-    ["مصاحبه تکمیل‌شده",data.counts.finished,"در انتظار بازبینی"],
-    ["ارزیابی‌های انسانی",data.counts.assessments,"امتیاز مستند"]
+    ["موقعیت‌های شغلی",data.counts.jobs,"شامل مشاغل نمونه"],
+    ["داوطلبان",data.counts.candidates,"شامل "+persian(data.counts.demo_candidates)+" پرونده نمونه"],
+    ["مصاحبه‌های تکمیل‌شده",data.counts.finished,"شامل داده آزمایشی"],
+    ["ارزیابی‌های واقعی انسانی",data.counts.assessments,"امتیازهای نمونه جدا هستند"]
   ];
   const row=$("stat-grid");row.replaceChildren();
   for(const [name,count,label] of stats) {
@@ -125,9 +125,9 @@ function renderRecent(recent) {
   const rows=$("recent-rows");rows.replaceChildren();
   if(!recent.length){const tr=create("tr");const cell=create("td",null,"هنوز مصاحبه‌ای ثبت نشده است.");cell.colSpan=5;tr.append(cell);rows.append(tr);return;}
   for(const item of recent) {
-    const tr=create("tr");td(tr,item.candidate);td(tr,item.job);
+    const tr=create("tr");td(tr,item.candidate+(item.is_demo?" · نمونه آزمایشی":""));td(tr,item.job);
     const st=create("td");st.append(statusBadge(item.status));tr.append(st);
-    td(tr,persian(item.human_ratings));
+    td(tr,item.is_demo?persian(item.demo_ratings)+" (نمونه)":persian(item.human_ratings));
     const cell=create("td"),button=create("button","btn-outline","نمایش گزارش");
     button.type="button";button.style.padding="8px 12px";
     button.addEventListener("click",()=>openReport(item.candidate_id,item.job_id));
@@ -146,7 +146,7 @@ function renderLists() {
   if(!candidates.length)empty(candidateRoot,"متقاضی ثبت نشده است.");
   else {
     const table=tableHead(["نام","ایمیل","شناسه"]),body=create("tbody");
-    for(const person of candidates.slice(0,100)) {const tr=create("tr");td(tr,person.full_name);td(tr,person.email);td(tr,persian(person.id));body.append(tr);}
+    for(const person of candidates.slice(0,100)) {const tr=create("tr");td(tr,person.full_name+(person.is_demo?" · نمونه آزمایشی":""));td(tr,person.email);td(tr,persian(person.id));body.append(tr);}
     table.append(body);candidateRoot.append(table);
   }
   for(const id of ["report-job","invite-job"])fillSelect(id,jobs,x=>x.title);
@@ -172,7 +172,10 @@ async function refresh() {
     summary=a;jobs=j;candidates=c;
     renderStats(a);renderTrend(a.activity);renderStatus(a.statuses);
     renderBars("chart-jobs",a.by_job,"count");
-    renderBars("chart-skills",a.competencies,"average");
+    const realScores=a.competencies.some(x=>x.count>0);
+    $("chart-skills-title").textContent=realScores?
+      "میانگین ارزیابی انسانی واقعی (از ۴)":"نمودار نمایشی — امتیازهای مصنوعی (از ۴)";
+    renderBars("chart-skills",realScores?a.competencies:a.demo_competencies,"average");
     renderRecent(a.recent);renderLists();
     await loadInvitations();
   }catch(error){toast(error.message,true);}
@@ -186,13 +189,13 @@ async function checkSession() {
   catch{csrf="";$("auth-screen").hidden=false;$("workspace").hidden=true;}
 }
 $("login-form").addEventListener("submit",async event=>{
-  event.preventDefault();const button=$("login-button");
+  event.preventDefault();const formElement=event.currentTarget,button=$("login-button");
   button.disabled=true;$("login-error").textContent="";
   try{
-    const form=new FormData(event.currentTarget);
+    const form=new FormData(formElement);
     const user=await api("auth/login",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({email:form.get("email"),password:form.get("password")})});
-    event.currentTarget.reset();signedIn(user);
+    formElement.reset();signedIn(user);
   }catch(error){$("login-error").textContent="ورود انجام نشد: "+error.message;}
   finally{button.disabled=false;}
 });
@@ -204,19 +207,19 @@ $("logout-button").addEventListener("click",async()=>{
 $("refresh-button").addEventListener("click",refresh);
 document.querySelectorAll("[data-view]").forEach(btn=>btn.addEventListener("click",()=>activate(btn.dataset.view)));
 $("job-form").addEventListener("submit",async event=>{
-  event.preventDefault();const f=new FormData(event.currentTarget);
+  event.preventDefault();const formElement=event.currentTarget,f=new FormData(formElement);
   try{
     await api("jobs",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({title:f.get("title"),description:f.get("description"),
         required_skills:String(f.get("skills")).split(/[,،]/).map(x=>x.trim()).filter(Boolean)})});
-    event.currentTarget.reset();toast("موقعیت جدید ثبت شد.");await refresh();
+    formElement.reset();toast("موقعیت جدید ثبت شد.");await refresh();
   }catch(error){toast(error.message,true);}
 });
 $("cv-form").addEventListener("submit",async event=>{
-  event.preventDefault();
+  event.preventDefault();const formElement=event.currentTarget,formData=new FormData(formElement);
   try{
-    const result=await api("candidates/upload",{method:"POST",body:new FormData(event.currentTarget)});
-    event.currentTarget.reset();toast("رزومه "+result.full_name+" ثبت شد.");await refresh();
+    const result=await api("candidates/upload",{method:"POST",body:formData});
+    formElement.reset();toast("رزومه "+result.full_name+" ثبت شد.");await refresh();
   }catch(error){toast(error.message,true);}
 });
 async function openReport(candidateId,jobId){
@@ -230,8 +233,9 @@ async function showReport() {
   try {
     const r=await api("reports/"+candidateId+"/"+jobId);root.replaceChildren();
     root.append(create("h3",null,r.candidate+" | "+r.job));
+    if(r.is_demo)root.append(create("p","notice","پرونده، پاسخ و امتیازهای این بخش کاملاً مصنوعی و فقط برای نمایش آزمایشی هستند."));
     root.append(create("p","small","تصمیم نهایی: بررسی انسانی الزامی است."));
-    root.append(create("h4",null,"ارزیابی‌های مستند"));
+    root.append(create("h4",null,r.is_demo?"امتیازهای نمایشی ساختگی":"ارزیابی‌های مستند"));
     if(!r.human_assessments.length)root.append(create("p",null,"هنوز ارزیابی انسانی ثبت نشده؛ امتیازی تخصیص داده نمی‌شود."));
     for(const item of r.human_assessments){
       const section=create("section");
@@ -240,7 +244,7 @@ async function showReport() {
       if(item.reviewer_notes)section.append(create("p","small",item.reviewer_notes));
       root.append(section);
     }
-    root.append(create("h4",null,"متن مصاحبه‌ها (ارسالی از مرورگر، تأییدنشده)"));
+    root.append(create("h4",null,r.is_demo?"گفت‌وگوی نمونه ساختگی":"متن مصاحبه‌ها (ارسالی از مرورگر، تأییدنشده)"));
     if(!r.interviews.length)root.append(create("p",null,"مصاحبه‌ای برای این موقعیت موجود نیست."));
     for(const session of r.interviews.slice(0,5)) {
       const panel=create("div");
@@ -262,24 +266,24 @@ $("show-match").addEventListener("click",async()=>{
   catch(error){output.textContent=error.message;}
 });
 $("assessment-form").addEventListener("submit",async event=>{
-  event.preventDefault();const f=new FormData(event.currentTarget);
+  event.preventDefault();const formElement=event.currentTarget,f=new FormData(formElement);
   try{
     await api("assessments",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({candidate_id:Number($("report-candidate").value),job_id:Number($("report-job").value),
         competency:f.get("competency"),score:Number(f.get("score")),
         observed_answer:f.get("observed_answer"),reviewer_notes:f.get("reviewer_notes")})});
-    event.currentTarget.reset();toast("ارزیابی انسانی ثبت شد.");
+    formElement.reset();toast("ارزیابی انسانی ثبت شد.");
     await refresh();await showReport();
   }catch(error){toast(error.message,true);}
 });
 $("invite-form").addEventListener("submit",async event=>{
-  event.preventDefault();const f=new FormData(event.currentTarget),slots=[];
+  event.preventDefault();const formElement=event.currentTarget,f=new FormData(formElement),slots=[];
   for(const key of ["slot1","slot2","slot3"]){const value=f.get(key);if(value)slots.push(new Date(value).toISOString());}
   try{
     const result=await api("invitations",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({candidate_id:Number($("invite-candidate").value),job_id:Number($("invite-job").value),slots})});
     toast(result.email_status==="sent"?"دعوت ثبت و ایمیل شد.":"دعوت ثبت شد؛ ارسال ایمیل انجام نشد، تنظیمات را بررسی کن.",result.email_status!=="sent");
-    event.currentTarget.reset();await refresh();
+    formElement.reset();await refresh();
   }catch(error){toast(error.message,true);}
 });
 checkSession();
