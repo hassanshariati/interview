@@ -12,7 +12,7 @@ from fastapi import HTTPException
 
 def configured() -> bool:
     return (os.getenv("LLM_PROVIDER", "").strip().lower() == "deepseek"
-            and bool(os.getenv("DEEPSEEK_API_KEY", "").strip()))
+            and os.getenv("DEEPSEEK_API_KEY", "").strip() not in ("", "YOUR_DEEPSEEK_API_KEY"))
 
 
 def deepseek_config() -> tuple[str, str, str]:
