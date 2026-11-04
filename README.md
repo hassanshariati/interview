@@ -266,3 +266,37 @@ experience is provided by browser speech recognition / speech synthesis, **not**
 native low-latency realtime audio through GapGPT. Some browsers use remote
 speech-to-text providers; test with fictitious CVs and review the privacy terms
 of both services before allowing real candidates.
+
+
+## Press-to-talk and post-interview technical analysis (v0.5.0)
+
+For GapGPT/DeepSeek text interviews, the candidate starts a session and hears
+one question (using browser speech synthesis where available). The interviewer
+**waits** for an answer. The candidate can type and send, or hold the
+**press-to-talk** button while speaking and release it to finalize recognition.
+A new AI follow-up is requested **only after the button is released** and
+speech recognition yields final text. Brief silence during a press should
+not automatically submit a partial answer; if ASR does not return final text,
+the candidate can type or edit an answer instead.
+
+Browser speech recognition is best-effort, including for Persian: browser
+support, microphone permissions, privacy and audio accuracy vary. Speech
+may be processed by the browser's external provider. Press-to-talk does not
+stream raw audio to GapGPT. Users must still explicitly consent.
+
+Authorized admin/recruiter users may open **گزارش و ارزیابی**, select a
+candidate and job, and after completion click **تحلیل شواهد فنی با AI** for
+a completed interview with at least one valid AI-flow answer. The model
+provides an evidence-based Persian synopsis, cited skill observations,
+uncertainties and follow-up questions. There are **no automatic interview
+scores or hire/reject recommendations**. The report is generated on demand
+and is not permanently stored; repeated requests consume provider tokens.
+Rate limit via `AI_REPORTS_PER_USER_HOUR` (default 6).
+
+Only server-associated interview turns are summarized, not arbitrary
+browser-submitted transcript messages. Email, phone and URL patterns are
+redacted from limited text excerpts before model transfer. This is a
+heuristic minimization, **not a guarantee** of removing every private
+detail. Reports and interview content require authorized management access;
+human reviewers must verify any asserted skill evidence and make
+employment decisions themselves.
