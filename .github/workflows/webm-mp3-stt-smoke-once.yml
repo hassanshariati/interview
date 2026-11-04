@@ -37,3 +37,4 @@ jobs:
           assert bool(result.strip())
           PY
           curl --fail --silent --show-error http://127.0.0.1:18080/api/v1/health | python3 -c 'import json,sys; x=json.load(sys.stdin); print("API_VERSION="+x["version"]); assert x["version"]=="0.5.4"'
+# Retry after verified offline production installation of v0.5.4
