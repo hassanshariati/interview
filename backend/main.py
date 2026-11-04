@@ -589,7 +589,7 @@ def report_ready_notification(candidate, job, invitation):
                    f"Job: {job.title}\n"
                    f"Interview record: {invitation.id}\n"
                    f"Review the evidence after signing in: {APP_ORIGIN}/admin\n"
-                   "This notice contains no audio or transcript. The interview is unscored until reviewed.")
+                   "This notice contains only report metadata. The interview is unscored until reviewed.")
         return "sent"
     except Exception:
         return "failed"
