@@ -300,3 +300,50 @@ heuristic minimization, **not a guarantee** of removing every private
 detail. Reports and interview content require authorized management access;
 human reviewers must verify any asserted skill evidence and make
 employment decisions themselves.
+
+
+## Persian spoken questions and full-length voice answers (v0.5.1)
+
+Earlier browser-only Web Speech recognition frequently lost speech across pauses
+and sometimes returned only the first few words; setting `lang=fa-IR` was not
+enough to install a Persian speech-synthesis voice. The current candidate page:
+
+1. Requests the **latest interviewer question** from the backend as Persian MP3
+   using `edge-tts` and the `fa-IR-DilaraNeural` voice; the browser exposes
+   a manual play control if autoplay is blocked. If the remote provider is
+   unavailable, it only attempts local TTS when a Persian browser voice exists
+   and never reads a Persian question with an English-only voice.
+2. On press-and-hold, **MediaRecorder records one entire audio clip** without
+   ending at short pauses; when the button is released, the complete clip is
+   sent to a bounded, consent-gated backend endpoint for transcription at
+   the selected GapGPT provider's OpenAI-compatible
+   `/v1/audio/transcriptions` API. A valid transcript is then submitted as a
+   candidate answer. Audio is **not stored** in the interview database.
+3. Allows up to 3 minutes and 8 MiB per recording. A browser-level
+   recognition fallback may still be incomplete; that fallback is now **never
+   auto-submitted** without the candidate reviewing/editing and clicking Send.
+   Recorded audio can be played back locally if transcription fails.
+
+Server-only optional settings (present default values in source):
+
+```dotenv
+PERSIAN_TTS_ENABLED=true
+PERSIAN_TTS_VOICE=fa-IR-DilaraNeural
+GAPGPT_STT_ENABLED=true
+GAPGPT_STT_MODEL=whisper-1
+```
+
+**Provider limits:** GapGPT is a third-party API gateway, and support for its
+`/audio/transcriptions` endpoint and individual STT models must be confirmed
+using the account's actual API plan; OpenAI compatibility for chat endpoints
+does not establish audio compatibility. If unsupported, text entry remains
+available and a separate STT service may be needed. Speech-to-text may
+consume provider credits. Neural TTS sends the question text to the Microsoft
+Edge speech service and depends on external connectivity. Review privacy
+terms with your organization before use with real resumes; the consent text
+discloses both external processors.
+
+The default reverse proxy has a 10 MiB request ceiling; the voice endpoint
+limits audio to 8 MiB. Avoid exposing private invitation tokens, audio or
+transcripts in logs. Always check actual Arabic/Persian speech output and
+ASR on desktop/mobile browsers with fake applicant data before real use.
