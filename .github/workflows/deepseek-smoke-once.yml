@@ -1,4 +1,4 @@
-name: One-time DeepSeek connection smoke test
+name: One-time DeepSeek account balance verification
 
 on:
   push:
@@ -10,38 +10,25 @@ permissions:
   contents: read
 
 jobs:
-  smoke:
+  balance:
     runs-on: [self-hosted, Linux, X64]
     environment: production
-    timeout-minutes: 5
+    timeout-minutes: 4
     steps:
-      - name: Test configured provider and synthetic API prompt without leaking secrets
+      - name: Check official balance availability without exposing key or amounts
         shell: bash
         run: |
           set -euo pipefail
           cd /opt/interview-ai
           docker compose exec -T api python - <<'PY'
-          import asyncio
-          import os
-          from fastapi import HTTPException
-          from backend.deepseek import configured, generate_question
-
-          provider = os.getenv("LLM_PROVIDER", "").strip().lower()
-          print("LLM_PROVIDER_IS_DEEPSEEK="+str(provider=="deepseek"))
-          print("DEEPSEEK_KEY_CONFIGURED="+str(configured()))
-          print("DEEPSEEK_MODEL_IS_FLASH="+str(os.getenv("DEEPSEEK_MODEL", "deepseek-flash")=="deepseek-flash"))
-          if not configured():
-              print("DEEPSEEK_API_SMOKE=not_configured")
-              raise SystemExit(2)
-          try:
-              response = asyncio.run(generate_question(
-                  "Ask one short practical interview question about Kubernetes in Persian.",
-                  [], None))
-              print("DEEPSEEK_API_SMOKE=success")
-              print("ANSWER_CHARACTERS="+str(len(response)))
-          except HTTPException as exc:
-              print("DEEPSEEK_API_SMOKE=failed")
-              print("ERROR_HTTP_STATUS="+str(exc.status_code))
-              print("ERROR_CATEGORY="+str(exc.detail))
-              raise SystemExit(1)
+          import httpx
+          from backend.deepseek import deepseek_config
+          key, model, base = deepseek_config()
+          with httpx.Client(timeout=15, follow_redirects=False) as client:
+              result = client.get("https://api.deepseek.com/user/balance",
+                                  headers={"Authorization": "Bearer " + key})
+          print("BALANCE_ENDPOINT_HTTP_STATUS="+str(result.status_code))
+          if result.status_code == 200:
+              data = result.json()
+              print("DEEPSEEK_BALANCE_IS_AVAILABLE="+str(data.get("is_available")))
           PY
