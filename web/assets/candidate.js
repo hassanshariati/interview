@@ -146,7 +146,7 @@ function finishBrowserTranscription(){
   if(draft)$("manual").value=draft.slice(0,6500);
   // Browser recognition frequently returns only a few early words.
   // Never silently send its potentially incomplete text to the LLM.
-  info(text?"متن موقت مرورگر ثبت شد. آن را با پاسخ کامل مقایسه، ویرایش و سپس «ارسال پاسخ» را بزن.":
+  info(text?"متن موقت مرورگر ثبت شد. آن را بررسی، با پاسخ کامل مقایسه و ویرایش و سپس «ارسال پاسخ» را بزن.":
       "مرورگر گفتار قابل‌اعتمادی تشخیص نداد. پاسخ را تایپ کن.");
   $("hold-to-talk").disabled=false;
 }
@@ -199,7 +199,7 @@ async function sendFullRecording(blob){
   if(!releasePending)return;
   releasePending=false;
   if(blob.size<1024){info("ضبط صدا خالی است؛ دوباره امتحان کن یا پاسخ را بنویس.");return;}
-  if(blob.size>12*1024*1024){info("حجم فایل صوتی بزرگ است. پاسخ را کوتاه‌تر ضبط کن یا بنویس.");return;}
+  if(blob.size>8*1024*1024){info("حجم فایل صوتی بزرگ است. پاسخ را کوتاه‌تر ضبط کن یا بنویس.");return;}
   if(recordedAudioURL&&typeof URL!=="undefined")URL.revokeObjectURL(recordedAudioURL);
   recordedAudioURL=URL.createObjectURL(blob);
   const player=$("recorded-audio");
