@@ -1,0 +1,178 @@
+name: One-time DSS production installation
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/dss-one-time-deploy.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: dss-on-erp-host
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Install DSS while preserving ERP and Interview services
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    steps:
+      - name: Verify this is the approved host
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(hostname)" = "srv1355487570"
+          test "$(id -un)" = "runner"
+          docker info >/dev/null
+          docker network inspect deploy_default >/dev/null
+          docker inspect deploy-caddy-1 >/dev/null
+          test -w /opt/erp/deploy/Caddyfile
+          test ! -e "$HOME/dss" || test -d "$HOME/dss/.git"
+          if ss -lnt | grep -q '127.0.0.1:18110 '; then
+            echo "Port 18110 already in use; refusing collision" >&2
+            exit 1
+          fi
+
+      - name: Download reviewed DSS revision into independent directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d "$HOME/dss/.git" ]; then
+            git clone https://github.com/hassanshariati/dss.git "$HOME/dss"
+          fi
+          cd "$HOME/dss"
+          test -z "$(git status --porcelain --untracked-files=no)" || { echo "Dirty repository; refusing" >&2; exit 1; }
+          git fetch origin main
+          git checkout --detach 4065407dce25472076871eb36a5d6617e764c659
+          test -f docker-compose.yml
+          test -f backend/app/seed_admin.py
+          test -f backend/app/seed_demo.py
+
+      - name: Generate private production configuration on server
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$HOME/dss"
+          umask 077
+          python3 - <<'PY'
+          import os, secrets, string
+          from pathlib import Path
+          path = Path.home() / "dss" / ".env"
+          if not path.exists():
+              chars = string.ascii_letters + string.digits
+              password = "".join(secrets.choice(chars) for _ in range(48))
+              secret = secrets.token_urlsafe(64)
+              content = (
+                  "POSTGRES_PASSWORD=" + password + "\n"
+                  "SESSION_SECRET=" + secret + "\n"
+                  "APP_BIND_PORT=18110\n"
+                  "COOKIE_SECURE=true\n"
+                  "SEED_DEMO_DATA=true\n"
+                  "LLM_API_KEY=\n"
+              )
+              path.write_text(content)
+              os.chmod(path, 0o600)
+          print("Production environment file exists; secret values are not logged.")
+          PY
+          docker compose config -q
+
+      - name: Build and start only DSS containers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$HOME/dss"
+          docker compose up -d --build
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 5 http://127.0.0.1:18110/api/health; then
+              echo
+              break
+            fi
+            if [ "$i" = "30" ]; then
+              docker compose logs --tail 80 api
+              exit 1
+            fi
+            sleep 3
+          done
+          docker compose exec -T api python -m app.seed_demo
+
+      - name: Create first admin with password stored only on server
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$HOME/dss"
+          umask 077
+          python3 - <<'PY'
+          import os, secrets
+          from pathlib import Path
+          path = Path.home() / "dss" / ".dss-first-admin"
+          if not path.exists():
+              path.write_text("Email: shariati.hassan@gmail.com\nTemporary password: " + secrets.token_urlsafe(32) + "\n")
+              os.chmod(path, 0o600)
+          print("Initial administrator credentials are stored in a 0600 local server file; not in Actions logs.")
+          PY
+          ADMIN_PASS="$(sed -n 's/^Temporary password: //p' "$HOME/dss/.dss-first-admin")"
+          export DSS_INITIAL_ADMIN_EMAIL="shariati.hassan@gmail.com"
+          export DSS_INITIAL_ADMIN_PASSWORD="$ADMIN_PASS"
+          docker compose exec -T -e DSS_INITIAL_ADMIN_EMAIL -e DSS_INITIAL_ADMIN_PASSWORD api python -m app.seed_admin
+          unset ADMIN_PASS DSS_INITIAL_ADMIN_PASSWORD DSS_INITIAL_ADMIN_EMAIL
+
+      - name: Validate proxy reachability from existing Caddy
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec deploy-caddy-1 wget -qO- http://dss-api:8000/api/health
+          echo
+
+      - name: Safely add dedicated DSS hostname to existing Caddyfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          CADDYFILE=/opt/erp/deploy/Caddyfile
+          BACKUP="$HOME/dss/Caddyfile.pre-dss.bak"
+          cp -p "$CADDYFILE" "$BACKUP"
+          if ! grep -Eq '^[[:space:]]*dss[.]armember[.]ir[[:space:]]*\{' "$CADDYFILE"; then
+            cat >> "$CADDYFILE" <<'CADDY'
+
+          # DSS Decision Support Studio, kept independent of ERP and Interview.
+          dss.armember.ir {
+              encode zstd gzip
+              reverse_proxy dss-api:8000
+              header {
+                  X-Content-Type-Options nosniff
+                  X-Frame-Options DENY
+                  Referrer-Policy strict-origin-when-cross-origin
+              }
+          }
+          CADDY
+          fi
+          if ! docker exec deploy-caddy-1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile; then
+            cp "$BACKUP" "$CADDYFILE"
+            echo "Caddy config validation failed; restored original." >&2
+            exit 1
+          fi
+          if ! docker exec deploy-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
+            cp "$BACKUP" "$CADDYFILE"
+            docker exec deploy-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile || true
+            echo "Caddy reload failed; original config restored." >&2
+            exit 1
+          fi
+
+      - name: Verify public HTTPS application and existing services
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 18); do
+            if curl -fsS --connect-timeout 6 --max-time 16 https://dss.armember.ir/api/health; then
+              echo
+              break
+            fi
+            if [ "$i" = "18" ]; then
+              echo "Public HTTPS did not become healthy" >&2
+              exit 1
+            fi
+            sleep 4
+          done
+          curl -fsS --max-time 10 https://dss.armember.ir/ | grep -q 'DSS'
+          docker ps --format 'container={{.Names}} state={{.Status}}' | grep -E 'dss-|interview-ai|deploy-caddy' | head -n 20
+          echo "DSS deployed. Administrator credentials were NOT printed and must be retrieved securely from $HOME/dss/.dss-first-admin"
