@@ -5,40 +5,40 @@ on:
     paths:
       - .github/workflows/dss-server-preflight.yml
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: dss-host-preflight
-  cancel-in-progress: false
-
 jobs:
   inspect:
-    name: Check existing interview runner for DSS deployment
+    name: Inspect network and existing Caddy deployment
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 6
     steps:
-      - name: Read-only environment and gateway discovery
+      - name: Check server routes and storage, without modification
         shell: bash
         run: |
           set -u
-          echo "host=$(hostname)"
-          echo "runner_user=$(id -un)"
-          echo "docker_bin=$(command -v docker || echo missing)"
-          docker info --format 'docker-access=ok' 2>/dev/null || echo "docker-access=denied"
-          docker compose version 2>/dev/null || true
-          echo "opt_writable=$([ -w /opt ] && echo yes || echo no)"
-          echo "dss_dir=$([ -e /opt/dss ] && echo exists || echo absent)"
-          if [ -d /opt/dss ]; then
-            stat -c 'dss_owner=%U:%G mode=%a' /opt/dss
-          fi
-          echo "existing_services:"
-          docker ps --format 'service={{.Names}} ports={{.Ports}}' 2>/dev/null || true
-          echo "web_listeners:"
-          ss -lnt 2>/dev/null | grep -E ':(80|443|18110|18080)\s' || true
-          echo "current_gateway_binary:"
-          for name in nginx caddy; do
-            command -v "$name" 2>/dev/null || true
-          done
-          echo "done"
+          printf 'host=%s user=%s home=%s\n' "$(hostname)" "$(id -un)" "$HOME"
+          printf 'local_IPs='
+          hostname -I || true
+          printf 'armember_dns='
+          getent ahostsv4 armember.ir | awk 'NR==1 {print $1}' || true
+          printf 'interview_dns='
+          getent ahostsv4 interview.armember.ir | awk 'NR==1 {print $1}' || true
+          printf 'public_ipv4='
+          curl -4 -fsSL --connect-timeout 3 --max-time 8 https://api.ipify.org || true
+          echo
+          printf 'github_access='
+          curl -L -Is --connect-timeout 4 --max-time 10 https://github.com/hassanshariati/dss.git | head -n 1 || true
+          printf 'docker_hub_access='
+          curl -Is --connect-timeout 4 --max-time 8 https://registry-1.docker.io/v2/ | head -n 1 || true
+          printf 'runner_home_writable=%s\n' "$([ -w "$HOME" ] && echo yes || echo no)"
+          printf 'sudo_nopass=%s\n' "$(sudo -n true 2>/dev/null && echo yes || echo no)"
+          df -h / | tail -n 1
+          echo 'relevant_cached_images:'
+          docker image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E 'postgres|python|node|caddy' | head -n 20 || true
+          echo 'caddy_mounts:'
+          docker inspect deploy-caddy-1 --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}' 2>/dev/null || true
+          echo 'caddy_current_site_lines:'
+          docker exec deploy-caddy-1 sh -c 'grep -E "^(armember.ir|interview.armember.ir|[[:space:]]*(reverse_proxy|handle|handle_path|import|route))" /etc/caddy/Caddyfile | head -n 70' 2>/dev/null || true
+          echo 'other_proxy_containers:'
+          docker ps --format '{{.Names}}' | grep -E 'nginx|proxy|caddy' || true
