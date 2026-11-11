@@ -1,22 +1,27 @@
-name: DSS PyPI mirrors diagnostic
+name: DSS API health diagnostics
 on:
   push:
     branches: [main]
     paths: [.github/workflows/dss-server-preflight.yml]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  check:
+  diagnose:
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
-      - name: Try package index from isolated Python container
+      - name: Inspect DSS containers and recent startup errors
         shell: bash
         run: |
           set +e
-          for index in https://pypi.org/simple https://pypi.tuna.tsinghua.edu.cn/simple https://mirrors.aliyun.com/pypi/simple https://pypi.python.org/simple; do
-            echo "INDEX=$index"
-            docker run --rm --entrypoint python public.ecr.aws/docker/library/python:3.12-slim \
-              -m pip index versions fastapi --index-url "$index" --timeout 6 --retries 0 2>&1 | head -n 6
-            echo "END_INDEX"
-          done
+          echo "=== DSS CONTAINERS ==="
+          cd /home/runner/dss
+          docker compose ps -a
+          echo "=== DSS API STATE ==="
+          docker inspect dss-api-1 --format 'status={{.State.Status}} restarts={{.RestartCount}} exit={{.State.ExitCode}} health={{if .State.Health}}{{.State.Health.Status}}{{end}}'
+          echo "=== API RECENT LOGS ==="
+          docker compose logs --tail=95 --no-color api | sed -E 's/(password|secret|token)(=[^ ]+)/\1=[REDACTED]/Ig'
+          echo "=== HEALTH CHECK ==="
+          curl -fsS --max-time 5 http://127.0.0.1:18110/api/health
+          echo
