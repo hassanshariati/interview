@@ -1,0 +1,137 @@
+name: Deploy DSS to dedicated subdomain
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/dss-domain-install.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: dss-domain-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    steps:
+      - name: Check target and prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(hostname)" = "srv1355487570"
+          test "$(id -un)" = "runner"
+          test -d "$HOME/dss/.git"
+          test -f "$HOME/dss/.env"
+          test -w /opt/erp/deploy/Caddyfile
+          docker info >/dev/null
+          docker network inspect deploy_default >/dev/null
+          docker inspect deploy-caddy-1 >/dev/null
+
+      - name: Update DSS to checked version
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$HOME/dss"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          git fetch origin main
+          git checkout --detach 8e9bc317a6eb8980ae6a0ed930d41121be8691e9
+          grep -q 'pypi.tuna.tsinghua.edu.cn' Dockerfile
+          docker compose config -q
+
+      - name: Build and start DSS only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$HOME/dss"
+          docker compose up -d --build
+          for i in $(seq 1 32); do
+            if curl -fsS --max-time 4 http://127.0.0.1:18110/api/health; then
+              echo "DSS API ready"
+              break
+            fi
+            if [ "$i" = 32 ]; then
+              docker compose ps
+              docker compose logs --tail 60 api
+              exit 1
+            fi
+            sleep 3
+          done
+          docker compose exec -T api python -m app.seed_demo
+
+      - name: Create first admin privately on host
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$HOME/dss"
+          umask 077
+          python3 - <<'PY'
+          from pathlib import Path
+          import secrets, os
+          p = Path.home() / "dss" / ".dss-first-admin"
+          if not p.exists():
+              p.write_text("Email: shariati.hassan@gmail.com\nTemporary password: " + secrets.token_urlsafe(32) + "\n")
+              os.chmod(p, 0o600)
+          print("Admin credential file prepared locally with 0600 permissions; contents withheld from logs")
+          PY
+          ADMIN_PASS="$(sed -n 's/^Temporary password: //p' "$HOME/dss/.dss-first-admin")"
+          export DSS_INITIAL_ADMIN_EMAIL="shariati.hassan@gmail.com"
+          export DSS_INITIAL_ADMIN_PASSWORD="$ADMIN_PASS"
+          docker compose exec -T -e DSS_INITIAL_ADMIN_EMAIL -e DSS_INITIAL_ADMIN_PASSWORD api python -m app.seed_admin
+          unset ADMIN_PASS DSS_INITIAL_ADMIN_EMAIL DSS_INITIAL_ADMIN_PASSWORD
+
+      - name: Validate DSS from existing reverse proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec deploy-caddy-1 wget -qO- http://dss-api:8000/api/health
+
+      - name: Add isolated Caddy hostname with rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          CADDYFILE=/opt/erp/deploy/Caddyfile
+          BACKUP="$HOME/dss/Caddyfile.before-dss.backup"
+          cp -p "$CADDYFILE" "$BACKUP"
+          if ! grep -Eq '^[[:space:]]*dss[.]armember[.]ir[[:space:]]*\{' "$CADDYFILE"; then
+            cat >> "$CADDYFILE" <<'CADDY'
+
+          dss.armember.ir {
+              encode zstd gzip
+              reverse_proxy dss-api:8000
+              header {
+                  X-Content-Type-Options nosniff
+                  X-Frame-Options DENY
+                  Referrer-Policy strict-origin-when-cross-origin
+              }
+          }
+          CADDY
+          fi
+          if ! docker exec deploy-caddy-1 caddy validate --config /etc/caddy/Caddyfile; then
+            cp "$BACKUP" "$CADDYFILE"
+            exit 1
+          fi
+          if ! docker exec deploy-caddy-1 caddy reload --config /etc/caddy/Caddyfile; then
+            cp "$BACKUP" "$CADDYFILE"
+            docker exec deploy-caddy-1 caddy reload --config /etc/caddy/Caddyfile || true
+            exit 1
+          fi
+
+      - name: Check new domain and preserve existing websites
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 16); do
+            if curl -fsS --max-time 12 https://dss.armember.ir/api/health; then
+              echo
+              break
+            fi
+            if [ "$i" = 16 ]; then
+              echo "HTTPS check unsuccessful"
+              exit 1
+            fi
+            sleep 4
+          done
+          curl -fsS --max-time 12 https://dss.armember.ir/ | grep -q 'DSS'
+          docker ps --format 'name={{.Names}} status={{.Status}}' | grep -E '^name=(dss-|interview-ai|deploy-caddy-1)' | head -n 20
