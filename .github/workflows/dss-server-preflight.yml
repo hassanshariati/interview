@@ -1,23 +1,22 @@
-name: DSS alternate registry probe
+name: DSS PyPI mirrors diagnostic
 on:
   push:
     branches: [main]
     paths: [.github/workflows/dss-server-preflight.yml]
-  workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  probe:
+  check:
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 10
+    timeout-minutes: 8
     steps:
-      - name: Check public ECR image registry for DSS bases
+      - name: Try package index from isolated Python container
         shell: bash
         run: |
           set +e
-          echo "Checking alternate mirror for Python and Node images..."
-          docker pull public.ecr.aws/docker/library/python:3.12-slim
-          echo "PYTHON_EXIT=$?"
-          docker pull public.ecr.aws/docker/library/node:22-alpine
-          echo "NODE_EXIT=$?"
-          docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -E '(public.ecr.aws/docker/library/(python|node)|postgres:17-alpine)'
+          for index in https://pypi.org/simple https://pypi.tuna.tsinghua.edu.cn/simple https://mirrors.aliyun.com/pypi/simple https://pypi.python.org/simple; do
+            echo "INDEX=$index"
+            docker run --rm --entrypoint python public.ecr.aws/docker/library/python:3.12-slim \
+              -m pip index versions fastapi --index-url "$index" --timeout 6 --retries 0 2>&1 | head -n 6
+            echo "END_INDEX"
+          done
