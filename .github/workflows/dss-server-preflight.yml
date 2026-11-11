@@ -1,44 +1,33 @@
-name: DSS server preflight (read-only)
+name: DSS server network preflight (read-only)
 on:
   push:
     branches: [main]
-    paths:
-      - .github/workflows/dss-server-preflight.yml
+    paths: [.github/workflows/dss-server-preflight.yml]
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   inspect:
-    name: Inspect network and existing Caddy deployment
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 6
+    timeout-minutes: 5
     steps:
-      - name: Check server routes and storage, without modification
+      - name: Resolve domain and inspect Docker routing
         shell: bash
         run: |
           set -u
-          printf 'host=%s user=%s home=%s\n' "$(hostname)" "$(id -un)" "$HOME"
-          printf 'local_IPs='
-          hostname -I || true
-          printf 'armember_dns='
-          getent ahostsv4 armember.ir | awk 'NR==1 {print $1}' || true
-          printf 'interview_dns='
-          getent ahostsv4 interview.armember.ir | awk 'NR==1 {print $1}' || true
-          printf 'public_ipv4='
-          curl -4 -fsSL --connect-timeout 3 --max-time 8 https://api.ipify.org || true
-          echo
-          printf 'github_access='
-          curl -L -Is --connect-timeout 4 --max-time 10 https://github.com/hassanshariati/dss.git | head -n 1 || true
-          printf 'docker_hub_access='
-          curl -Is --connect-timeout 4 --max-time 8 https://registry-1.docker.io/v2/ | head -n 1 || true
-          printf 'runner_home_writable=%s\n' "$([ -w "$HOME" ] && echo yes || echo no)"
-          printf 'sudo_nopass=%s\n' "$(sudo -n true 2>/dev/null && echo yes || echo no)"
-          df -h / | tail -n 1
-          echo 'relevant_cached_images:'
-          docker image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E 'postgres|python|node|caddy' | head -n 20 || true
-          echo 'caddy_mounts:'
-          docker inspect deploy-caddy-1 --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}' 2>/dev/null || true
-          echo 'caddy_current_site_lines:'
-          docker exec deploy-caddy-1 sh -c 'grep -E "^(armember.ir|interview.armember.ir|[[:space:]]*(reverse_proxy|handle|handle_path|import|route))" /etc/caddy/Caddyfile | head -n 70' 2>/dev/null || true
-          echo 'other_proxy_containers:'
-          docker ps --format '{{.Names}}' | grep -E 'nginx|proxy|caddy' || true
+          echo 'DSS_DNS:'
+          getent ahostsv4 dss.armember.ir | head -n 2 || true
+          echo 'DSS_HTTP:'
+          curl -LsI --connect-timeout 4 --max-time 9 http://dss.armember.ir/ | head -n 7 || true
+          echo 'DSS_HTTPS:'
+          curl -LsI --connect-timeout 4 --max-time 9 https://dss.armember.ir/ | head -n 7 || true
+          echo 'CADDY_NETWORKS:'
+          docker inspect deploy-caddy-1 --format '{{range $key,$value := .NetworkSettings.Networks}}{{println $key " " $value.IPAddress}}{{end}}'
+          echo 'CADDYFILE:'
+          docker exec deploy-caddy-1 cat /etc/caddy/Caddyfile | head -n 100
+          echo 'CADDYFILE_METADATA:'
+          stat -c '%U:%G %a %n' /opt/erp/deploy/Caddyfile || true
+          echo 'RUNNER_DOCKER_NETWORKS:'
+          docker network ls --format '{{.Name}} {{.Driver}}' | head -n 35
+          echo 'HOME_FILESYSTEM:'
+          stat -c '%U:%G %a %n' /home/runner /home/runner/dss 2>/dev/null || true
