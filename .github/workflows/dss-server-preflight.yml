@@ -1,27 +1,35 @@
-name: DSS API health diagnostics
+name: DSS final read-only verification
 on:
   push:
     branches: [main]
     paths: [.github/workflows/dss-server-preflight.yml]
-  workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  diagnose:
+  check:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 5
     steps:
-      - name: Inspect DSS containers and recent startup errors
+      - name: Check DSS health and other applications
         shell: bash
         run: |
           set +e
-          echo "=== DSS CONTAINERS ==="
           cd /home/runner/dss
-          docker compose ps -a
-          echo "=== DSS API STATE ==="
-          docker inspect dss-api-1 --format 'status={{.State.Status}} restarts={{.RestartCount}} exit={{.State.ExitCode}} health={{if .State.Health}}{{.State.Health.Status}}{{end}}'
-          echo "=== API RECENT LOGS ==="
-          docker compose logs --tail=95 --no-color api | sed -E 's/(password|secret|token)(=[^ ]+)/\1=[REDACTED]/Ig'
-          echo "=== HEALTH CHECK ==="
+          echo "DSS_LOCAL:"
           curl -fsS --max-time 5 http://127.0.0.1:18110/api/health
           echo
+          echo "DSS_PUBLIC:"
+          curl -fsS --max-time 10 https://dss.armember.ir/api/health
+          echo
+          echo "DSS_LOGIN_PAGE:"
+          curl -s -o /dev/null -w '%{http_code}\n' --max-time 10 https://dss.armember.ir/login/management
+          echo "ERP_STATUS:"
+          curl -s -o /dev/null -w '%{http_code}\n' --max-time 10 https://armember.ir/
+          echo "INTERVIEW_STATUS:"
+          curl -s -o /dev/null -w '%{http_code}\n' --max-time 10 https://interview.armember.ir/
+          echo "DSS_CONTAINERS:"
+          docker compose ps
+          echo "DSS_DEMO_SEED_CHECK:"
+          docker compose exec -T api python -m app.seed_demo
+          echo "ADMIN_EXISTS:"
+          docker compose exec -T api python -c "import os;from sqlalchemy import create_engine,select;from sqlalchemy.orm import Session;from app.models import User;db=Session(create_engine(os.environ['DATABASE_URL']));print(bool(db.scalar(select(User.id).where(User.role == 'admin'))));db.close()"
