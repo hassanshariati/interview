@@ -1,0 +1,44 @@
+name: DSS server preflight (read-only)
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/dss-server-preflight.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dss-host-preflight
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Check existing interview runner for DSS deployment
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 6
+    steps:
+      - name: Read-only environment and gateway discovery
+        shell: bash
+        run: |
+          set -u
+          echo "host=$(hostname)"
+          echo "runner_user=$(id -un)"
+          echo "docker_bin=$(command -v docker || echo missing)"
+          docker info --format 'docker-access=ok' 2>/dev/null || echo "docker-access=denied"
+          docker compose version 2>/dev/null || true
+          echo "opt_writable=$([ -w /opt ] && echo yes || echo no)"
+          echo "dss_dir=$([ -e /opt/dss ] && echo exists || echo absent)"
+          if [ -d /opt/dss ]; then
+            stat -c 'dss_owner=%U:%G mode=%a' /opt/dss
+          fi
+          echo "existing_services:"
+          docker ps --format 'service={{.Names}} ports={{.Ports}}' 2>/dev/null || true
+          echo "web_listeners:"
+          ss -lnt 2>/dev/null | grep -E ':(80|443|18110|18080)\s' || true
+          echo "current_gateway_binary:"
+          for name in nginx caddy; do
+            command -v "$name" 2>/dev/null || true
+          done
+          echo "done"
