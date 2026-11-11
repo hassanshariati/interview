@@ -1,4 +1,4 @@
-name: DSS server network preflight (read-only)
+name: DSS alternate registry probe
 on:
   push:
     branches: [main]
@@ -7,27 +7,17 @@ on:
 permissions:
   contents: read
 jobs:
-  inspect:
+  probe:
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Resolve domain and inspect Docker routing
+      - name: Check public ECR image registry for DSS bases
         shell: bash
         run: |
-          set -u
-          echo 'DSS_DNS:'
-          getent ahostsv4 dss.armember.ir | head -n 2 || true
-          echo 'DSS_HTTP:'
-          curl -LsI --connect-timeout 4 --max-time 9 http://dss.armember.ir/ | head -n 7 || true
-          echo 'DSS_HTTPS:'
-          curl -LsI --connect-timeout 4 --max-time 9 https://dss.armember.ir/ | head -n 7 || true
-          echo 'CADDY_NETWORKS:'
-          docker inspect deploy-caddy-1 --format '{{range $key,$value := .NetworkSettings.Networks}}{{println $key " " $value.IPAddress}}{{end}}'
-          echo 'CADDYFILE:'
-          docker exec deploy-caddy-1 cat /etc/caddy/Caddyfile | head -n 100
-          echo 'CADDYFILE_METADATA:'
-          stat -c '%U:%G %a %n' /opt/erp/deploy/Caddyfile || true
-          echo 'RUNNER_DOCKER_NETWORKS:'
-          docker network ls --format '{{.Name}} {{.Driver}}' | head -n 35
-          echo 'HOME_FILESYSTEM:'
-          stat -c '%U:%G %a %n' /home/runner /home/runner/dss 2>/dev/null || true
+          set +e
+          echo "Checking alternate mirror for Python and Node images..."
+          docker pull public.ecr.aws/docker/library/python:3.12-slim
+          echo "PYTHON_EXIT=$?"
+          docker pull public.ecr.aws/docker/library/node:22-alpine
+          echo "NODE_EXIT=$?"
+          docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -E '(public.ecr.aws/docker/library/(python|node)|postgres:17-alpine)'
