@@ -44,7 +44,7 @@ jobs:
           cd "$HOME/dss"
           test -z "$(git status --porcelain --untracked-files=no)" || { echo "Dirty repository; refusing" >&2; exit 1; }
           git fetch origin main
-          git checkout --detach 4065407dce25472076871eb36a5d6617e764c659
+          git checkout --detach 616b1c4946593a28d064cce4cb08cfe87f99a6ab
           test -f docker-compose.yml
           test -f backend/app/seed_admin.py
           test -f backend/app/seed_demo.py
