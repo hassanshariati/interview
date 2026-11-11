@@ -1,0 +1,58 @@
+name: Activate DSS domain and sample data
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/dss-activate.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  activate:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    steps:
+      - name: Verify DSS and populate synthetic samples
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(hostname)" = "srv1355487570"
+          cd /home/runner/dss
+          curl -fsS http://127.0.0.1:18110/api/health
+          docker compose exec -T api python -m app.seed_demo
+          docker exec deploy-caddy-1 wget -qO- http://dss-api:8000/api/health
+      - name: Safely route dedicated hostname
+        shell: bash
+        run: |
+          set -euo pipefail
+          C=/opt/erp/deploy/Caddyfile
+          test -w "$C"
+          if grep -q '^dss.armember.ir {' "$C"; then
+            echo "DSS hostname already present; no config edit"
+          else
+            cp -p "$C" /home/runner/dss/Caddyfile.pre-dss
+            cat >> "$C" <<'CADDY'
+
+          dss.armember.ir {
+              encode zstd gzip
+              reverse_proxy dss-api:8000
+          }
+          CADDY
+          fi
+          if ! docker exec deploy-caddy-1 caddy validate --config /etc/caddy/Caddyfile; then
+            cp /home/runner/dss/Caddyfile.pre-dss "$C"
+            exit 1
+          fi
+          docker exec deploy-caddy-1 caddy reload --config /etc/caddy/Caddyfile
+      - name: Confirm public HTTPS health
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 12); do
+            if curl -fsS --max-time 10 https://dss.armember.ir/api/health; then
+              curl -fsS https://dss.armember.ir/ | grep -q 'DSS'
+              echo "DSS domain is live"
+              exit 0
+            fi
+            sleep 4
+          done
+          exit 1
